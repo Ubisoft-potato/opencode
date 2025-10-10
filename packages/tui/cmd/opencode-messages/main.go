@@ -145,6 +145,9 @@ func main() {
 	// Start session synchronization monitor
 	go renderer.monitorSessionSync(ctx)
 
+	// Start message polling as backup mechanism
+	go renderer.startMessagePolling(ctx)
+
 	// Wait for shutdown signal
 	select {
 	case sig := <-sigChan:
@@ -284,6 +287,30 @@ func (r *MessageRenderer) listenForEvents(ctx context.Context) {
 			case ipc.EventSessionCreated:
 				slog.Info("Messages pane received session created event")
 				// Could refresh session list or handle new session
+			case ipc.EventMessageSent:
+				// Handle message sent events from input pane
+				if data, ok := event.Data.(map[string]interface{}); ok {
+					if sessionID, exists := data["session_id"].(string); exists {
+						if sessionID == r.app.Session.ID {
+							slog.Info("Messages pane received message sent event for current session", "sessionID", sessionID)
+							// Refresh messages for current session
+							r.loadMessagesForSession(sessionID)
+							r.HandleEvent("message_sent")
+						}
+					}
+				}
+			case ipc.EventMessageReceived:
+				// Handle message received events (from server/assistant responses)
+				if data, ok := event.Data.(map[string]interface{}); ok {
+					if sessionID, exists := data["session_id"].(string); exists {
+						if sessionID == r.app.Session.ID {
+							slog.Info("Messages pane received message received event for current session", "sessionID", sessionID)
+							// Refresh messages for current session
+							r.loadMessagesForSession(sessionID)
+							r.HandleEvent("message_received")
+						}
+					}
+				}
 			case ipc.EventSessionDeleted:
 				sessionID := r.extractSessionID(event)
 				if sessionID != "" {
@@ -684,6 +711,45 @@ func (r *MessageRenderer) monitorSessionSync(ctx context.Context) {
 					"sessionTitle", r.app.Session.Title,
 					"messageCount", len(r.app.Messages),
 					"ipcConnected", r.ipcClient != nil)
+			}
+		}
+	}
+}
+
+// startMessagePolling polls for message updates as a backup mechanism
+func (r *MessageRenderer) startMessagePolling(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second) // Poll every 2 seconds
+	defer ticker.Stop()
+
+	var lastMessageCount int
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if r.app.Session.ID != "" {
+				// Check if message count has changed
+				messages, err := r.app.ListMessages(ctx, r.app.Session.ID)
+				if err != nil {
+					continue // Skip this poll cycle on error
+				}
+
+				currentMessageCount := len(messages)
+				if currentMessageCount != lastMessageCount {
+					slog.Info("Message polling detected message count change",
+						"sessionID", r.app.Session.ID,
+						"previousCount", lastMessageCount,
+						"currentCount", currentMessageCount)
+
+					// Update messages and trigger render
+					r.app.Messages = messages
+					r.HandleEvent("messages_polled")
+					lastMessageCount = currentMessageCount
+				}
+			} else {
+				// Reset counter when no session
+				lastMessageCount = 0
 			}
 		}
 	}

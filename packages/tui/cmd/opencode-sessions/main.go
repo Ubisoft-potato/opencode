@@ -380,7 +380,7 @@ func (b *SessionsBrowser) selectCurrentSession() {
 	// 检查是否已经是当前session
 	if b.app.Session.ID == session.ID {
 		slog.Info("Already on the selected session", "sessionID", session.ID)
-		fmt.Printf("⚠️  已经在session: %s\n", session.Title)
+		fmt.Printf("⚠️  Already in session: %s\n", session.Title)
 		time.Sleep(1 * time.Second)
 		b.render()
 		return
@@ -447,12 +447,12 @@ func (b *SessionsBrowser) selectCurrentSession() {
 				"maxRetries", maxRetries,
 				"sessionID", sessionData.SessionID,
 				"eventData", sessionData)
-			fmt.Printf("⚠️  会话切换成功，但通知其他面板失败\n")
+			fmt.Printf("⚠️  The session switch was successful, but the notification to other panels failed\n")
 		}
 	} else {
 		slog.Warn("IPC client is nil, cannot send session change event",
 			"sessionID", session.ID)
-		fmt.Printf("⚠️  IPC连接不可用，使用文件同步备用方案\n")
+		fmt.Printf("⚠️  IPC connection unavailable, file synchronization alternative is used\n")
 	}
 
 	// Fallback: write to shared state file
@@ -477,13 +477,13 @@ func (b *SessionsBrowser) deleteCurrentSession() {
 	// 验证输入
 	if b.selectedIndex < 0 || b.selectedIndex >= len(b.sessions) {
 		slog.Warn("Invalid session index for deletion", "selectedIndex", b.selectedIndex, "sessionsCount", len(b.sessions))
-		b.showError("没有选中有效的session")
+		b.showError("No valid session selected")
 		return
 	}
 
 	if len(b.sessions) == 0 {
 		slog.Warn("No sessions available for deletion")
-		b.showError("没有可删除的session")
+		b.showError("No erasable sessions")
 		return
 	}
 

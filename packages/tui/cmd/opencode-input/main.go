@@ -188,15 +188,9 @@ func (h *InputHandler) Start(ctx context.Context) error {
 	}
 	defer h.rl.Close()
 
-	// Connect to IPC server if available
+	// Connect to IPC server with enhanced reliability
 	if h.ipcClient != nil {
-		err := h.ipcClient.Connect(ctx)
-		if err != nil {
-			slog.Warn("Failed to connect to IPC server", "error", err)
-		} else {
-			defer h.ipcClient.Disconnect()
-			slog.Info("Connected to IPC server")
-		}
+		go h.maintainIPCConnection(ctx)
 	}
 
 	// Start IPC event listening in background
@@ -204,11 +198,18 @@ func (h *InputHandler) Start(ctx context.Context) error {
 		go h.listenForEvents(ctx)
 	}
 
+	// Start periodic session sync to ensure we don't miss session changes
+	go h.startPeriodicSessionSync(ctx)
+
+	// Start session state monitoring for debugging
+	go h.startSessionStateMonitoring(ctx)
+
 	// Try to sync with current session from shared state
 	h.syncWithSharedSession()
 
-	// Display welcome message
+	// Display welcome message with debug info
 	h.displayWelcomeMessage()
+	h.debugSessionState()
 
 	for {
 		select {
@@ -322,30 +323,67 @@ func (h *InputHandler) handleCommand(command string) error {
 }
 
 func (h *InputHandler) SendPrompt(text string) error {
+	// Force immediate sync to catch any recent session changes
+	if h.syncWithSharedSession() {
+		fmt.Printf("🔄 Synced with selected session: %s\n", h.app.Session.Title)
+	}
+
 	if h.app.Session.ID == "" {
-		// FIRST: Try to sync with existing selected session from other panes
-		fmt.Println("\n🔍 No active session found. Checking if another pane has selected a session...")
+		fmt.Println("\n🔍 No active session found. Attempting enhanced session discovery...")
 
-		if h.syncWithSharedSession() {
-			fmt.Printf("✅ Found selected session: %s\n", h.app.Session.ID)
-			fmt.Println("📤 Sending your message to the selected session...")
-		} else {
-			// ONLY create new session if no session is selected anywhere
-			fmt.Println("🚀 No session selected anywhere. Creating a new session...")
+		// Enhanced session detection with multiple strategies
+		currentTime := time.Now()
 
-			err := h.createNewSession()
-			if err != nil {
-				fmt.Printf("❌ Failed to create new session: %v\n", err)
-				fmt.Println("💡 Try typing '/new' to create a session manually, or check if the server is running.")
-				return fmt.Errorf("no active session and failed to create one: %w", err)
+		// Strategy 1: Immediate sync attempts with progressive delays
+		for attempt := 1; attempt <= 5; attempt++ {
+			if h.syncWithSharedSession() {
+				fmt.Printf("✅ Found selected session on immediate attempt %d: %s (%s)\n",
+					attempt, h.app.Session.Title, h.app.Session.ID)
+				fmt.Println("📤 Proceeding to send your message...")
+				break
 			}
 
-			fmt.Println("✅ New session created! Sending your message...")
+			if attempt <= 2 {
+				time.Sleep(50 * time.Millisecond) // Quick retries first
+			} else {
+				time.Sleep(200 * time.Millisecond) // Longer waits for later attempts
+			}
+		}
 
-			// Notify other panes about the new session via both IPC and shared state
-			h.notifySessionChange(h.app.Session.ID, "New Session")
+		// Strategy 2: Wait for potential session changes using the new method
+		if h.app.Session.ID == "" {
+			fmt.Println("🕐 Waiting for session selection (up to 2 seconds)...")
+
+			newState, err := h.stateManager.WaitForStateChange(currentTime, 2*time.Second)
+			if err != nil {
+				slog.Warn("Failed to wait for state change", "error", err)
+			} else if newState.CurrentSessionID != "" {
+				h.app.Session.ID = newState.CurrentSessionID
+				h.app.Session.Title = newState.CurrentTitle
+				fmt.Printf("✅ Detected session selection: %s (%s)\n",
+					h.app.Session.Title, h.app.Session.ID)
+			}
+		}
+
+		// Strategy 3: Final verification and user guidance
+		if h.app.Session.ID == "" {
+			// Get current shared state for debugging
+			if sharedState, err := h.stateManager.GetState(); err == nil {
+				fmt.Printf("🔍 Debug: Shared state shows session '%s' updated by '%s' at %s\n",
+					sharedState.CurrentSessionID, sharedState.UpdatedBy,
+					sharedState.LastUpdated.Format("15:04:05"))
+			}
+
+			fmt.Println("\n⚠️  No session is currently selected in any pane.")
+			fmt.Println("🔧 Please select a session from the Sessions pane (left panel) first,")
+			fmt.Println("   or type '/new' to create a new session manually.")
+			fmt.Println("💡 If you just selected a session, please try again in a moment.")
+			return fmt.Errorf("no session selected - please choose a session first or use /new")
 		}
 	}
+
+	// Final verification before sending
+	fmt.Printf("📋 Session confirmed: %s (%s)\n", h.app.Session.Title, h.app.Session.ID)
 
 	// Send message to OpenCode via HTTP API
 	if err := h.sendMessageToSession(text); err != nil {
@@ -353,7 +391,7 @@ func (h *InputHandler) SendPrompt(text string) error {
 		return err
 	}
 
-	fmt.Printf("📤 Message sent: %s\n", text)
+	fmt.Printf("📤 Message sent successfully!\n")
 	return nil
 }
 
@@ -542,24 +580,42 @@ func (h *InputHandler) sendMessageToSession(text string) error {
 		return fmt.Errorf("server returned status code %d: %s", resp.StatusCode, string(body))
 	}
 
+	// Success! Notify other panes that a message was sent
+	h.notifyMessageSent(text)
+
 	return nil
 }
 
 // syncWithSharedSession tries to sync with a session selected in other panes
 func (h *InputHandler) syncWithSharedSession() bool {
-	if sharedState, err := h.stateManager.GetState(); err == nil {
-		if sharedState.CurrentSessionID != "" && sharedState.CurrentSessionID != h.app.Session.ID {
-			slog.Info("Input pane syncing with shared session",
-				"currentSession", h.app.Session.ID,
-				"sharedSession", sharedState.CurrentSessionID,
-				"updatedBy", sharedState.UpdatedBy)
-
-			h.app.Session.ID = sharedState.CurrentSessionID
-			h.app.Session.Title = sharedState.CurrentTitle
-			return true
-		}
+	sharedState, err := h.stateManager.GetState()
+	if err != nil {
+		slog.Warn("Failed to get shared state during sync", "error", err)
+		return false
 	}
-	return false
+
+	// Check if we need to sync
+	if sharedState.CurrentSessionID == "" {
+		// No session selected in shared state
+		return false
+	}
+
+	if sharedState.CurrentSessionID == h.app.Session.ID {
+		// Already synced with the shared session
+		return false
+	}
+
+	// Sync with shared session
+	slog.Info("Input pane syncing with shared session",
+		"currentSession", h.app.Session.ID,
+		"sharedSession", sharedState.CurrentSessionID,
+		"updatedBy", sharedState.UpdatedBy,
+		"lastUpdated", sharedState.LastUpdated.Format("15:04:05"))
+
+	h.app.Session.ID = sharedState.CurrentSessionID
+	h.app.Session.Title = sharedState.CurrentTitle
+
+	return true
 }
 
 // notifySessionChange notifies other panes about session changes
@@ -612,6 +668,198 @@ func (h *InputHandler) extractSessionID(event *ipc.Event) string {
 	}
 
 	return ""
+}
+
+// notifyMessageSent notifies other panes that a message was sent to the current session
+func (h *InputHandler) notifyMessageSent(text string) {
+	if h.app.Session.ID == "" {
+		return
+	}
+
+	// Update shared state to indicate message activity
+	if err := h.stateManager.SetState(h.app.Session.ID, h.app.Session.Title, "input-message"); err != nil {
+		slog.Error("Failed to update shared state after message sent", "error", err)
+	}
+
+	// Send IPC event if available
+	if h.ipcClient != nil {
+		messageEvent := ipc.NewEvent(ipc.EventMessageSent, "input", &ipc.MessageData{
+			SessionID: h.app.Session.ID,
+			Text:      text,
+			Timestamp: time.Now().Unix(),
+		})
+		if err := h.ipcClient.Send(messageEvent); err != nil {
+			slog.Warn("Failed to send message sent event", "error", err)
+		} else {
+			slog.Info("Successfully notified other panes of message sent", "sessionID", h.app.Session.ID)
+		}
+	}
+}
+
+// startPeriodicSessionSync runs periodic session synchronization to catch missed events
+func (h *InputHandler) startPeriodicSessionSync(ctx context.Context) {
+	var lastStateCheck time.Time
+	ticker := time.NewTicker(500 * time.Millisecond) // More frequent checks for responsiveness
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Check if state has been updated since our last check
+			stateChanged, err := h.stateManager.IsStateNewer(lastStateCheck)
+			if err != nil {
+				slog.Warn("Failed to check state freshness", "error", err)
+				continue
+			}
+
+			if !stateChanged && h.app.Session.ID != "" {
+				// No state changes and we have a session, skip this cycle
+				continue
+			}
+
+			// Update our check timestamp
+			lastStateCheck = time.Now()
+
+			// Try to sync with current state
+			if h.syncWithSharedSession() {
+				slog.Info("Periodic sync: synced with shared session",
+					"sessionID", h.app.Session.ID,
+					"sessionTitle", h.app.Session.Title)
+				h.displayWelcomeMessage()
+			} else if h.app.Session.ID == "" {
+				// Log periodically that we're waiting for session selection
+				slog.Debug("Periodic sync: waiting for session selection")
+			}
+		}
+	}
+}
+
+// maintainIPCConnection handles IPC connection with auto-reconnection
+func (h *InputHandler) maintainIPCConnection(ctx context.Context) {
+	connected := false
+	retryDelay := 1 * time.Second
+	maxRetryDelay := 30 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			if connected {
+				h.ipcClient.Disconnect()
+			}
+			return
+		default:
+			if !connected {
+				fmt.Printf("🔗 Attempting to connect to IPC server...\n")
+				err := h.ipcClient.Connect(ctx)
+				if err != nil {
+					slog.Warn("Failed to connect to IPC server, retrying", "error", err, "retryDelay", retryDelay)
+					fmt.Printf("⚠️  IPC connection failed, retrying in %v...\n", retryDelay)
+
+					time.Sleep(retryDelay)
+					// Exponential backoff with max limit
+					retryDelay = time.Duration(float64(retryDelay) * 1.5)
+					if retryDelay > maxRetryDelay {
+						retryDelay = maxRetryDelay
+					}
+					continue
+				}
+
+				connected = true
+				retryDelay = 1 * time.Second // Reset retry delay on success
+				fmt.Printf("✅ Connected to IPC server successfully\n")
+				slog.Info("IPC connection established")
+
+				// Immediately try to sync session state after connection
+				if h.syncWithSharedSession() {
+					fmt.Printf("🔄 Synced session after IPC connection: %s\n", h.app.Session.ID)
+					h.displayWelcomeMessage()
+				}
+			}
+
+			// Check connection health every 5 seconds
+			time.Sleep(5 * time.Second)
+
+			// Simple health check - if we can't access the socket file, mark as disconnected
+			socketPath := os.Getenv("OPENCODE_IPC_SOCKET")
+			if socketPath != "" {
+				if _, err := os.Stat(socketPath); err != nil {
+					if connected {
+						slog.Warn("IPC socket file disappeared, marking as disconnected", "socketPath", socketPath)
+						fmt.Printf("⚠️  IPC connection lost, attempting to reconnect...\n")
+						connected = false
+						h.ipcClient.Disconnect()
+					}
+				}
+			}
+		}
+	}
+}
+
+// debugSessionState provides detailed debugging information about current session state
+func (h *InputHandler) debugSessionState() {
+	fmt.Println("\n=== 🔍 Input Panel Session Debug ===")
+	fmt.Printf("📋 Current Session ID: %s\n", h.app.Session.ID)
+	fmt.Printf("📋 Current Session Title: %s\n", h.app.Session.Title)
+	fmt.Printf("🔗 IPC Client Connected: %v\n", h.ipcClient != nil)
+
+	// Check shared state file
+	if sharedState, err := h.stateManager.GetState(); err == nil {
+		fmt.Printf("📁 Shared State Session ID: %s\n", sharedState.CurrentSessionID)
+		fmt.Printf("📁 Shared State Title: %s\n", sharedState.CurrentTitle)
+		fmt.Printf("📁 Last Updated By: %s\n", sharedState.UpdatedBy)
+		fmt.Printf("📁 Last Updated: %s\n", sharedState.LastUpdated.Format("15:04:05"))
+	} else {
+		fmt.Printf("❌ Failed to read shared state: %v\n", err)
+	}
+
+	// Check IPC socket
+	socketPath := os.Getenv("OPENCODE_IPC_SOCKET")
+	fmt.Printf("🔌 IPC Socket Path: %s\n", socketPath)
+	if socketPath != "" {
+		if _, err := os.Stat(socketPath); err == nil {
+			fmt.Printf("✅ IPC Socket File Exists\n")
+		} else {
+			fmt.Printf("❌ IPC Socket File Missing: %v\n", err)
+		}
+	}
+
+	fmt.Println("============================================")
+
+	// Log to system as well
+	slog.Info("Input Panel Session Debug",
+		"sessionID", h.app.Session.ID,
+		"sessionTitle", h.app.Session.Title,
+		"ipcConnected", h.ipcClient != nil,
+		"socketPath", socketPath)
+}
+
+// startSessionStateMonitoring continuously monitors session state for debugging
+func (h *InputHandler) startSessionStateMonitoring(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second) // Debug every 5 seconds
+	defer ticker.Stop()
+
+	lastSessionID := h.app.Session.ID
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentSessionID := h.app.Session.ID
+			if currentSessionID != lastSessionID {
+				fmt.Printf("\n🔄 Session state changed: %s → %s\n", lastSessionID, currentSessionID)
+				h.debugSessionState()
+				lastSessionID = currentSessionID
+			}
+
+			// Log periodic state for debugging
+			slog.Debug("Input Panel periodic state check",
+				"sessionID", currentSessionID,
+				"ipcConnected", h.ipcClient != nil)
+		}
+	}
 }
 
 // Simple completer for basic commands and files

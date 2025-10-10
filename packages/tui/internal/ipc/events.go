@@ -43,6 +43,7 @@ type MessageData struct {
 	SessionID string `json:"session_id"`
 	MessageID string `json:"message_id"`
 	Text      string `json:"text"`
+	Timestamp int64  `json:"timestamp,omitempty"`
 }
 
 // PaneFocusData contains data for pane focus events
