@@ -84,8 +84,9 @@ func main() {
 	defer ipcServer.Stop()
 	slog.Info("✅ IPC server started successfully")
 
-	// Set environment variable for panes to find the IPC socket
+	// Set environment variables for panes to find the IPC socket and shared state
 	os.Setenv("OPENCODE_IPC_SOCKET", socketPath)
+	os.Setenv("OPENCODE_FORCE_TERMINAL", "true") // Force terminal mode for tmux
 
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -223,22 +224,30 @@ func createTmuxSession(sessionName string, model, prompt, agent, sessionID *stri
 		args = append(args, "--session", *sessionID)
 	}
 
+	// Get current environment variables to pass to panes
+	ipcSocket := os.Getenv("OPENCODE_IPC_SOCKET")
+	forceTerminal := os.Getenv("OPENCODE_FORCE_TERMINAL")
+	opencodServer := os.Getenv("OPENCODE_SERVER")
+
 	// Start sessions pane (left pane - pane 0)
-	sessionsCmd := fmt.Sprintf("%s %s", sessionsPath, strings.Join(args, " "))
+	sessionsCmd := fmt.Sprintf("OPENCODE_IPC_SOCKET='%s' OPENCODE_FORCE_TERMINAL='%s' OPENCODE_SERVER='%s' %s %s",
+		ipcSocket, forceTerminal, opencodServer, sessionsPath, strings.Join(args, " "))
 	startSessionsCmd := exec.Command("tmux", "send-keys", "-t", sessionName+":0.0", sessionsCmd, "Enter")
 	if err := startSessionsCmd.Run(); err != nil {
 		return fmt.Errorf("failed to start sessions pane: %w", err)
 	}
 
 	// Start messages pane (right pane - pane 1)
-	messagesCmd := fmt.Sprintf("%s %s", messagesPath, strings.Join(args, " "))
+	messagesCmd := fmt.Sprintf("OPENCODE_IPC_SOCKET='%s' OPENCODE_FORCE_TERMINAL='%s' OPENCODE_SERVER='%s' %s %s",
+		ipcSocket, forceTerminal, opencodServer, messagesPath, strings.Join(args, " "))
 	startMessagesCmd := exec.Command("tmux", "send-keys", "-t", sessionName+":0.1", messagesCmd, "Enter")
 	if err := startMessagesCmd.Run(); err != nil {
 		return fmt.Errorf("failed to start messages pane: %w", err)
 	}
 
 	// Start input pane (bottom pane - pane 2)
-	inputCmd := fmt.Sprintf("%s %s", inputPath, strings.Join(args, " "))
+	inputCmd := fmt.Sprintf("OPENCODE_IPC_SOCKET='%s' OPENCODE_FORCE_TERMINAL='%s' OPENCODE_SERVER='%s' %s %s",
+		ipcSocket, forceTerminal, opencodServer, inputPath, strings.Join(args, " "))
 	startInputCmd := exec.Command("tmux", "send-keys", "-t", sessionName+":0.2", inputCmd, "Enter")
 	if err := startInputCmd.Run(); err != nil {
 		return fmt.Errorf("failed to start input pane: %w", err)

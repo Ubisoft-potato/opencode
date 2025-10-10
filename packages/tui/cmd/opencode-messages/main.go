@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,7 +17,9 @@ import (
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/api"
 	"github.com/sst/opencode/internal/app"
+	"github.com/sst/opencode/internal/debug"
 	"github.com/sst/opencode/internal/ipc"
+	"github.com/sst/opencode/internal/state"
 	"github.com/sst/opencode/internal/util"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
@@ -125,8 +128,22 @@ func main() {
 	// Start API server (for TUI control bridge)
 	go api.Start(ctx, nil, httpClient)
 
+	// Initialize with first available session if none specified
+	if app_.Session.ID == "" {
+		go func() {
+			// Wait a moment for other components to initialize
+			time.Sleep(1 * time.Second)
+			if err := renderer.loadFirstAvailableSession(); err != nil {
+				slog.Warn("Failed to load first available session", "error", err)
+			}
+		}()
+	}
+
 	// Start the renderer
 	go renderer.Start(ctx)
+
+	// Start session synchronization monitor
+	go renderer.monitorSessionSync(ctx)
 
 	// Wait for shutdown signal
 	select {
@@ -142,10 +159,12 @@ func main() {
 
 // MessageRenderer handles message display in the messages pane
 type MessageRenderer struct {
-	app        *app.App
-	lastRender string
-	eventChan  chan interface{}
-	ipcClient  *ipc.Client
+	app           *app.App
+	lastRender    string
+	eventChan     chan interface{}
+	ipcClient     *ipc.Client
+	stateManager  *state.StateManager
+	statusReporter *debug.StatusReporter
 }
 
 func NewMessageRenderer(app *app.App) *MessageRenderer {
@@ -156,10 +175,15 @@ func NewMessageRenderer(app *app.App) *MessageRenderer {
 		ipcClient = ipc.NewClient(socketPath)
 	}
 
+	statusReporter := debug.NewStatusReporter("messages")
+	statusReporter.UpdateIPCStatus(ipcClient != nil, socketPath)
+
 	return &MessageRenderer{
-		app:       app,
-		eventChan: make(chan interface{}, 100),
-		ipcClient: ipcClient,
+		app:           app,
+		eventChan:     make(chan interface{}, 100),
+		ipcClient:     ipcClient,
+		stateManager:  state.NewStateManager(),
+		statusReporter: statusReporter,
 	}
 }
 
@@ -228,19 +252,34 @@ func (r *MessageRenderer) listenForEvents(ctx context.Context) {
 			switch event.Type {
 			case ipc.EventSessionChanged:
 				sessionID := r.extractSessionID(event)
-				if sessionID != "" {
-					slog.Info("Messages pane received session change", "sessionID", sessionID)
+				if sessionID != "" && sessionID != r.app.Session.ID {
+					slog.Info("Messages pane received session change", "sessionID", sessionID, "previousID", r.app.Session.ID)
 
 					// Update app session
 					r.app.Session.ID = sessionID
 
+					// Try to get session title from the event data
+					if data, ok := event.Data.(map[string]interface{}); ok {
+						if title, exists := data["title"].(string); exists {
+							r.app.Session.Title = title
+							slog.Info("Updated session title", "title", title)
+						}
+					}
+
+					// Update status reporter
+					if r.statusReporter != nil {
+						r.statusReporter.UpdateSessionStatus(sessionID)
+					}
+
 					// Load messages for the new session
 					r.loadMessagesForSession(sessionID)
 
-					// Trigger render
+					// Trigger render immediately
 					r.HandleEvent("session_changed")
 				} else {
-					slog.Error("Failed to extract sessionID from session change event", "eventData", event.Data)
+					if sessionID == "" {
+						slog.Error("Failed to extract sessionID from session change event", "eventData", event.Data)
+					}
 				}
 			case ipc.EventSessionCreated:
 				slog.Info("Messages pane received session created event")
@@ -273,6 +312,9 @@ func (r *MessageRenderer) loadMessagesForSession(sessionID string) {
 	}
 
 	slog.Info("Loading messages for session", "sessionID", sessionID)
+
+	// Clear existing messages immediately to show the switch
+	r.app.Messages = nil
 
 	// 添加超时控制
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -373,12 +415,19 @@ func (r *MessageRenderer) renderHeader(width int) string {
 
 func (r *MessageRenderer) renderMessages(width, height int) string {
 	if r.app.Session.ID == "" {
-		return "No active session selected.\nPlease select a session from the Sessions pane."
+		return fmt.Sprintf("%s\n%s\n\n%s\n%s",
+			"🔍 No active session selected",
+			"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+			"📋 Available actions:",
+			"   • Select a session from the Sessions pane (left panel)")
 	}
 
 	if len(r.app.Messages) == 0 {
-		return fmt.Sprintf("Session: %s\n\nNo messages in this session yet...\nSend a message from the Input pane to start the conversation.",
-			r.getSessionDisplayName())
+		return fmt.Sprintf("%s: %s\n%s\n\n%s\n%s",
+			"📝 Session", r.getSessionDisplayName(),
+			"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+			"💬 No messages in this session yet...",
+			"   Send a message from the Input pane to start the conversation.")
 	}
 
 	var lines []string
@@ -528,7 +577,15 @@ func (r *MessageRenderer) extractSessionID(event *ipc.Event) string {
 	}
 
 	// 方法4: 尝试JSON重新解析 (最后手段)
-	slog.Warn("All extraction methods failed, attempting JSON re-parsing", "dataType", fmt.Sprintf("%T", event.Data))
+	if jsonBytes, err := json.Marshal(event.Data); err == nil {
+		var sessionData ipc.SessionChangedData
+		if err := json.Unmarshal(jsonBytes, &sessionData); err == nil && sessionData.SessionID != "" {
+			slog.Debug("Successfully extracted sessionID via JSON re-parsing", "sessionID", sessionData.SessionID)
+			return sessionData.SessionID
+		}
+	}
+
+	slog.Warn("All extraction methods failed", "dataType", fmt.Sprintf("%T", event.Data))
 	return ""
 }
 
@@ -539,6 +596,97 @@ func getMapKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// loadFirstAvailableSession loads the first available session if no session is currently selected
+func (r *MessageRenderer) loadFirstAvailableSession() error {
+	if r.app.Session.ID != "" {
+		// Already have a session
+		return nil
+	}
+
+	// Get list of sessions
+	sessions, err := r.app.ListSessions(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list sessions: %w", err)
+	}
+
+	// Find first non-child session
+	for _, session := range sessions {
+		if session.ParentID == "" {
+			slog.Info("Auto-selecting first available session", "sessionID", session.ID, "title", session.Title)
+
+			// Update app session
+			r.app.Session.ID = session.ID
+			r.app.Session.Title = session.Title
+
+			// Load messages for this session
+			r.loadMessagesForSession(session.ID)
+
+			// Trigger render
+			r.HandleEvent("auto_session_selected")
+
+			return nil
+		}
+	}
+
+	slog.Info("No sessions available to auto-select")
+	return nil
+}
+
+// monitorSessionSync monitors for session synchronization issues and attempts recovery
+func (r *MessageRenderer) monitorSessionSync(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Try fallback state synchronization if IPC isn't working
+			if r.ipcClient == nil || r.app.Session.ID == "" {
+				if sharedState, err := r.stateManager.GetState(); err == nil {
+					if sharedState.CurrentSessionID != "" && sharedState.CurrentSessionID != r.app.Session.ID {
+						slog.Info("Fallback sync: found different session in shared state",
+							"currentSession", r.app.Session.ID,
+							"sharedSession", sharedState.CurrentSessionID,
+							"updatedBy", sharedState.UpdatedBy)
+
+						// Update to the session from shared state
+						r.app.Session.ID = sharedState.CurrentSessionID
+						r.app.Session.Title = sharedState.CurrentTitle
+						r.loadMessagesForSession(sharedState.CurrentSessionID)
+						r.HandleEvent("fallback_session_sync")
+					}
+				}
+			}
+
+			// Check if we have a session but no messages loaded, which might indicate sync issues
+			if r.app.Session.ID != "" && len(r.app.Messages) == 0 {
+				slog.Debug("Session sync check: have sessionID but no messages",
+					"sessionID", r.app.Session.ID)
+
+				// Try to reload messages
+				r.loadMessagesForSession(r.app.Session.ID)
+			} else if r.app.Session.ID == "" {
+				// No session selected, try to auto-select first available
+				slog.Debug("Session sync check: no session selected, attempting auto-select")
+				if err := r.loadFirstAvailableSession(); err != nil {
+					slog.Debug("Auto-select failed", "error", err)
+				}
+			}
+
+			// Debug output every sync cycle
+			if r.statusReporter != nil {
+				slog.Debug("Messages pane sync status",
+					"sessionID", r.app.Session.ID,
+					"sessionTitle", r.app.Session.Title,
+					"messageCount", len(r.app.Messages),
+					"ipcConnected", r.ipcClient != nil)
+			}
+		}
+	}
 }
 
 func getTerminalSize() (width, height int) {

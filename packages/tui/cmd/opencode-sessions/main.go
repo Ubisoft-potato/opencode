@@ -16,8 +16,9 @@ import (
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/app"
-	"github.com/sst/opencode/internal/util"
 	"github.com/sst/opencode/internal/ipc"
+	"github.com/sst/opencode/internal/state"
+	"github.com/sst/opencode/internal/util"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -138,6 +139,7 @@ type SessionsBrowser struct {
 	lastRender       string
 	refreshInterval  time.Duration
 	ipcClient        *ipc.Client
+	stateManager     *state.StateManager
 	keyboardEnabled  bool
 	confirmationMode bool
 	keyboardErrors   int
@@ -160,6 +162,7 @@ func NewSessionsBrowser(app *app.App) *SessionsBrowser {
 		selectedIndex:   0,
 		refreshInterval: 2 * time.Second,
 		ipcClient:       ipcClient,
+		stateManager:    state.NewStateManager(),
 		maxRetries:      5,
 		exitRequested:   false,
 	}
@@ -386,11 +389,12 @@ func (b *SessionsBrowser) selectCurrentSession() {
 	// Update app's current session
 	previousSessionID := b.app.Session.ID
 	b.app.Session.ID = session.ID
+	b.app.Session.Title = session.Title
 
-	// Update app session title if available
-	if b.app.Session != nil {
-		b.app.Session.Title = session.Title
-	}
+	slog.Info("Session selection updated locally",
+		"sessionID", session.ID,
+		"title", session.Title,
+		"previousSessionID", previousSessionID)
 
 	// Notify other panes via IPC about session change with retry logic
 	if b.ipcClient != nil {
@@ -406,6 +410,9 @@ func (b *SessionsBrowser) selectCurrentSession() {
 			"previousSessionID", previousSessionID,
 			"eventType", event.Type,
 			"dataType", fmt.Sprintf("%T", event.Data))
+
+		// Also log the raw event data for debugging
+		slog.Debug("Session change event details", "eventData", sessionData)
 
 		// Try sending with retry logic
 		maxRetries := 3
@@ -445,7 +452,14 @@ func (b *SessionsBrowser) selectCurrentSession() {
 	} else {
 		slog.Warn("IPC client is nil, cannot send session change event",
 			"sessionID", session.ID)
-		fmt.Printf("⚠️  IPC连接不可用，其他面板可能不会同步更新\n")
+		fmt.Printf("⚠️  IPC连接不可用，使用文件同步备用方案\n")
+	}
+
+	// Fallback: write to shared state file
+	if err := b.stateManager.SetState(session.ID, session.Title, "sessions"); err != nil {
+		slog.Error("Failed to update shared state as fallback", "error", err, "sessionID", session.ID)
+	} else {
+		slog.Info("Successfully updated shared state as fallback", "sessionID", session.ID)
 	}
 
 	fmt.Printf("✅ Switched to session: %s\n", session.Title)
@@ -531,9 +545,9 @@ func (b *SessionsBrowser) render() {
 	// Enhanced title with status
 	status := ""
 	if b.keyboardEnabled {
-		status = " [键盘就绪]"
+		status = " [keyboard ready]"
 	} else {
-		status = " [键盘未就绪]"
+		status = " [Keyboard not ready]"
 	}
 	title := fmt.Sprintf("Sessions%s (%d个)", status, len(b.sessions))
 
@@ -837,22 +851,37 @@ func (b *SessionsBrowser) notifySessionDeleted(sessionID string) {
 
 // initializeKeyboard 初始化键盘输入，带重试逻辑
 func (b *SessionsBrowser) initializeKeyboard() error {
+	// Check if we're in a tmux environment and have proper stdin
+	if !isStdinTerminal() {
+		slog.Warn("Not a proper terminal environment, using basic input mode")
+		b.keyboardEnabled = false
+		return fmt.Errorf("not a terminal environment")
+	}
+
 	var lastErr error
 
 	for attempt := 1; attempt <= b.maxRetries; attempt++ {
+		// For tmux, we need to be more careful about keyboard initialization
+		if isTmuxEnvironment() {
+			slog.Debug("Tmux environment detected, using tmux-specific initialization", "attempt", attempt)
+			// Add a small delay for tmux pane stabilization
+			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+		}
+
 		if err := keyboard.Open(); err != nil {
 			lastErr = err
-			slog.Warn("Keyboard initialization failed", "attempt", attempt, "error", err)
+			slog.Warn("Keyboard initialization failed", "attempt", attempt, "error", err, "isTmux", isTmuxEnvironment())
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond) // 递增延迟
 			continue
 		}
 
 		b.keyboardEnabled = true
 		b.keyboardErrors = 0
-		slog.Info("Keyboard input initialized successfully", "attempt", attempt)
+		slog.Info("Keyboard input initialized successfully", "attempt", attempt, "isTmux", isTmuxEnvironment())
 		return nil
 	}
 
+	slog.Error("Failed to initialize keyboard after all attempts", "maxAttempts", b.maxRetries, "lastError", lastErr, "isTmux", isTmuxEnvironment())
 	return fmt.Errorf("failed to initialize keyboard after %d attempts: %w", b.maxRetries, lastErr)
 }
 
@@ -944,4 +973,25 @@ func (b *SessionsBrowser) getSystemStatus() map[string]interface{} {
 		"sessionsCount":      len(b.sessions),
 		"maxRetries":         b.maxRetries,
 	}
+}
+
+// isStdinTerminal checks if stdin is a terminal
+func isStdinTerminal() bool {
+	if os.Getenv("OPENCODE_FORCE_TERMINAL") == "true" {
+		return true
+	}
+
+	// Check if stdin is a terminal
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+
+	// Check if it's a character device (terminal)
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+// isTmuxEnvironment checks if we're running inside tmux
+func isTmuxEnvironment() bool {
+	return os.Getenv("TMUX") != "" || os.Getenv("TMUX_PANE") != ""
 }

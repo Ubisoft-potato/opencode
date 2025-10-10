@@ -18,8 +18,9 @@ import (
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/app"
-	"github.com/sst/opencode/internal/util"
 	"github.com/sst/opencode/internal/ipc"
+	"github.com/sst/opencode/internal/state"
+	"github.com/sst/opencode/internal/util"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -142,10 +143,11 @@ func main() {
 
 // InputHandler handles user input and command processing
 type InputHandler struct {
-	app       *app.App
-	rl        *readline.Instance
-	history   []string
-	ipcClient *ipc.Client
+	app          *app.App
+	rl           *readline.Instance
+	history      []string
+	ipcClient    *ipc.Client
+	stateManager *state.StateManager
 }
 
 func NewInputHandler(app *app.App) *InputHandler {
@@ -172,10 +174,11 @@ func NewInputHandler(app *app.App) *InputHandler {
 	}
 
 	return &InputHandler{
-		app:       app,
-		rl:        rl,
-		history:   make([]string, 0),
-		ipcClient: ipcClient,
+		app:          app,
+		rl:           rl,
+		history:      make([]string, 0),
+		ipcClient:    ipcClient,
+		stateManager: state.NewStateManager(),
 	}
 }
 
@@ -200,6 +203,9 @@ func (h *InputHandler) Start(ctx context.Context) error {
 	if h.ipcClient != nil {
 		go h.listenForEvents(ctx)
 	}
+
+	// Try to sync with current session from shared state
+	h.syncWithSharedSession()
 
 	// Display welcome message
 	h.displayWelcomeMessage()
@@ -317,18 +323,28 @@ func (h *InputHandler) handleCommand(command string) error {
 
 func (h *InputHandler) SendPrompt(text string) error {
 	if h.app.Session.ID == "" {
-		// Provide user-friendly guidance instead of just an error
-		fmt.Println("\n🚀 No active session found. Creating a new session...")
+		// FIRST: Try to sync with existing selected session from other panes
+		fmt.Println("\n🔍 No active session found. Checking if another pane has selected a session...")
 
-		// Try to create a new session automatically
-		err := h.createNewSession()
-		if err != nil {
-			fmt.Printf("❌ Failed to create new session: %v\n", err)
-			fmt.Println("💡 Try typing '/new' to create a session manually, or check if the server is running.")
-			return fmt.Errorf("no active session and failed to create one: %w", err)
+		if h.syncWithSharedSession() {
+			fmt.Printf("✅ Found selected session: %s\n", h.app.Session.ID)
+			fmt.Println("📤 Sending your message to the selected session...")
+		} else {
+			// ONLY create new session if no session is selected anywhere
+			fmt.Println("🚀 No session selected anywhere. Creating a new session...")
+
+			err := h.createNewSession()
+			if err != nil {
+				fmt.Printf("❌ Failed to create new session: %v\n", err)
+				fmt.Println("💡 Try typing '/new' to create a session manually, or check if the server is running.")
+				return fmt.Errorf("no active session and failed to create one: %w", err)
+			}
+
+			fmt.Println("✅ New session created! Sending your message...")
+
+			// Notify other panes about the new session via both IPC and shared state
+			h.notifySessionChange(h.app.Session.ID, "New Session")
 		}
-
-		fmt.Println("✅ New session created! Sending your message...")
 	}
 
 	// Send message to OpenCode via HTTP API
@@ -438,14 +454,23 @@ func (h *InputHandler) listenForEvents(ctx context.Context) {
 		case event := <-h.ipcClient.Events():
 			switch event.Type {
 			case ipc.EventSessionChanged:
-				if data, ok := event.Data.(map[string]interface{}); ok {
-					if sessionID, exists := data["session_id"].(string); exists {
-						h.app.Session.ID = sessionID
-						fmt.Printf("📡 Session switched to: %s\n", sessionID)
+				sessionID := h.extractSessionID(event)
+				if sessionID != "" && sessionID != h.app.Session.ID {
+					slog.Info("Input pane received session change", "sessionID", sessionID, "previousID", h.app.Session.ID)
 
-						// Update welcome message to reflect new session
-						h.displayWelcomeMessage()
+					h.app.Session.ID = sessionID
+
+					// Try to get session title from the event data
+					if data, ok := event.Data.(map[string]interface{}); ok {
+						if title, exists := data["title"].(string); exists {
+							h.app.Session.Title = title
+						}
 					}
+
+					fmt.Printf("📡 Session switched to: %s\n", sessionID)
+
+					// Update welcome message to reflect new session
+					h.displayWelcomeMessage()
 				}
 			case ipc.EventSessionCreated:
 				fmt.Println("📡 New session created by another pane")
@@ -518,6 +543,75 @@ func (h *InputHandler) sendMessageToSession(text string) error {
 	}
 
 	return nil
+}
+
+// syncWithSharedSession tries to sync with a session selected in other panes
+func (h *InputHandler) syncWithSharedSession() bool {
+	if sharedState, err := h.stateManager.GetState(); err == nil {
+		if sharedState.CurrentSessionID != "" && sharedState.CurrentSessionID != h.app.Session.ID {
+			slog.Info("Input pane syncing with shared session",
+				"currentSession", h.app.Session.ID,
+				"sharedSession", sharedState.CurrentSessionID,
+				"updatedBy", sharedState.UpdatedBy)
+
+			h.app.Session.ID = sharedState.CurrentSessionID
+			h.app.Session.Title = sharedState.CurrentTitle
+			return true
+		}
+	}
+	return false
+}
+
+// notifySessionChange notifies other panes about session changes
+func (h *InputHandler) notifySessionChange(sessionID, title string) {
+	// Update shared state
+	if err := h.stateManager.SetState(sessionID, title, "input"); err != nil {
+		slog.Error("Failed to update shared state", "error", err, "sessionID", sessionID)
+	}
+
+	// Send IPC event if available
+	if h.ipcClient != nil {
+		event := ipc.NewEvent(ipc.EventSessionChanged, "input", &ipc.SessionChangedData{
+			SessionID: sessionID,
+			Title:     title,
+		})
+		if err := h.ipcClient.Send(event); err != nil {
+			slog.Warn("Failed to send session change event", "error", err)
+		} else {
+			slog.Info("Successfully notified other panes of session change", "sessionID", sessionID)
+		}
+	}
+}
+
+// extractSessionID extracts session ID from IPC event data with multiple fallback methods
+func (h *InputHandler) extractSessionID(event *ipc.Event) string {
+	if event.Data == nil {
+		return ""
+	}
+
+	// Method 1: Direct type assertion to SessionChangedData
+	if sessionData, ok := event.Data.(*ipc.SessionChangedData); ok {
+		return sessionData.SessionID
+	}
+
+	// Method 2: Value type assertion
+	if sessionData, ok := event.Data.(ipc.SessionChangedData); ok {
+		return sessionData.SessionID
+	}
+
+	// Method 3: Map interface access
+	if data, ok := event.Data.(map[string]interface{}); ok {
+		possibleKeys := []string{"session_id", "SessionID", "sessionId", "sessionID"}
+		for _, key := range possibleKeys {
+			if value, exists := data[key]; exists {
+				if sessionID, ok := value.(string); ok && sessionID != "" {
+					return sessionID
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // Simple completer for basic commands and files

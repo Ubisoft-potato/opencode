@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // SocketPath returns the path for the IPC socket
@@ -151,18 +152,51 @@ func NewClient(socketPath string) *Client {
 	}
 }
 
-// Connect connects to the IPC server
+// Connect connects to the IPC server with retry logic and verification
 func (c *Client) Connect(ctx context.Context) error {
-	conn, err := net.Dial("unix", c.socketPath)
-	if err != nil {
-		return fmt.Errorf("failed to connect to socket: %w", err)
+	maxRetries := 10
+	retryDelay := 500 * time.Millisecond
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Check if socket file exists
+		if _, err := os.Stat(c.socketPath); os.IsNotExist(err) {
+			if attempt == 1 {
+				fmt.Printf("🔍 IPC socket not found at %s, waiting for server...\n", c.socketPath)
+			}
+			if attempt < maxRetries {
+				time.Sleep(retryDelay)
+				continue
+			}
+			return fmt.Errorf("IPC socket file does not exist after %d attempts: %s", maxRetries, c.socketPath)
+		}
+
+		conn, err := net.Dial("unix", c.socketPath)
+		if err != nil {
+			fmt.Printf("⚠️  IPC connection attempt %d/%d failed: %v\n", attempt, maxRetries, err)
+			if attempt < maxRetries {
+				time.Sleep(retryDelay)
+				continue
+			}
+			return fmt.Errorf("failed to connect to socket after %d attempts: %w", maxRetries, err)
+		}
+
+		c.conn = conn
+		fmt.Printf("✅ IPC connected successfully on attempt %d\n", attempt)
+
+		// Start reading events
+		go c.readEvents(ctx)
+
+		// Send a ping to verify connection
+		if err := c.sendPing(); err != nil {
+			fmt.Printf("⚠️  IPC ping failed: %v\n", err)
+		} else {
+			fmt.Printf("🔄 IPC ping successful\n")
+		}
+
+		return nil
 	}
-	c.conn = conn
 
-	// Start reading events
-	go c.readEvents(ctx)
-
-	return nil
+	return fmt.Errorf("failed to connect after %d attempts", maxRetries)
 }
 
 // Disconnect disconnects from the IPC server
@@ -186,6 +220,15 @@ func (c *Client) Send(event *Event) error {
 // Events returns the channel for receiving events
 func (c *Client) Events() <-chan *Event {
 	return c.eventChan
+}
+
+// sendPing sends a ping event to verify connection
+func (c *Client) sendPing() error {
+	pingEvent := NewEvent("ping", "client", map[string]interface{}{
+		"timestamp": time.Now().Unix(),
+		"client_id": fmt.Sprintf("client_%d", os.Getpid()),
+	})
+	return c.Send(pingEvent)
 }
 
 func (c *Client) readEvents(ctx context.Context) {
