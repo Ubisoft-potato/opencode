@@ -26,6 +26,31 @@ if (typeof OPENCODE_TUI_PATH !== "undefined") {
   })
 }
 
+/**
+ * Wait for the server to be ready by checking config endpoint
+ */
+async function waitForServerReady(serverUrl: string, maxAttempts: number = 60): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(`${serverUrl}/config`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      })
+
+      if (response.ok) {
+        return // Server is ready
+      }
+    } catch (error) {
+      // Server not ready yet, continue waiting
+    }
+
+    // Wait 500ms before next attempt
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+
+  throw new Error(`服务器在 ${maxAttempts * 500}ms 内未能就绪`)
+}
+
 export const TuiCommand = cmd({
   command: "$0 [project]",
   describe: "start opencode tui",
@@ -109,6 +134,17 @@ export const TuiCommand = cmd({
           hostname: args.hostname,
         })
 
+        // Check if TMux mode is enabled early to handle server readiness
+        const useTmux = process.env.OPENCODE_TUI_MODE === "tmux"
+
+        // For TMux mode, just give the server a moment to start
+        if (useTmux) {
+          UI.println("🚀 start server...")
+          // Brief wait for server initialization, components will handle retries
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          UI.println("✅ server starting，TMux components will be automatically connected")
+        }
+
         let cmd = [] as string[]
         const tui = Bun.embeddedFiles.find((item) => (item as File).name.includes("tui")) as File
         if (tui) {
@@ -125,10 +161,38 @@ export const TuiCommand = cmd({
           cmd = [binary]
         }
         if (!tui) {
-          const dir = Bun.fileURLToPath(new URL("../../../../tui/cmd/opencode", import.meta.url))
-          let binaryName = `./dist/tui${process.platform === "win32" ? ".exe" : ""}`
-          await $`go build -o ${binaryName} ./main.go`.cwd(dir)
-          cmd = [path.join(dir, binaryName)]
+          if (useTmux) {
+            const dir = Bun.fileURLToPath(new URL("../../../../tui/cmd/opencode-tmux", import.meta.url))
+            let binaryName = `./dist/tmux-tui${process.platform === "win32" ? ".exe" : ""}`
+
+            // Build all required pane binaries first
+            UI.println("🔨 Building TMux components...")
+
+            // Build TMux orchestrator
+            await $`go build -o ${binaryName} ./main.go`.cwd(dir)
+
+            // Build pane binaries
+            const paneCommands = [
+              { name: "messages-pane", dir: "opencode-messages" },
+              { name: "input-pane", dir: "opencode-input" },
+              { name: "sessions-pane", dir: "opencode-sessions" }
+            ]
+
+            for (const pane of paneCommands) {
+              const paneDir = path.join(path.dirname(dir), pane.dir)
+              const outputPath = `./dist/${pane.name}`
+              await $`go build -o ${outputPath} ./main.go`.cwd(paneDir)
+            }
+
+            UI.println("✅ TMux component construction is complete")
+            cmd = [path.join(dir, binaryName)]
+          } else {
+            // Original Bubble Tea TUI
+            const dir = Bun.fileURLToPath(new URL("../../../../tui/cmd/opencode", import.meta.url))
+            let binaryName = `./dist/tui${process.platform === "win32" ? ".exe" : ""}`
+            await $`go build -o ${binaryName} ./main.go`.cwd(dir)
+            cmd = [path.join(dir, binaryName)]
+          }
         }
         Log.Default.info("tui", {
           cmd,

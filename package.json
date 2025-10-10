@@ -6,6 +6,8 @@
   "packageManager": "bun@1.2.21",
   "scripts": {
     "dev": "bun run packages/opencode/src/index.ts",
+    "tui": "bun run packages/opencode/src/index.ts",
+    "tui:tmux": "OPENCODE_TUI_MODE=tmux bun run packages/opencode/src/index.ts",
     "typecheck": "bun turbo typecheck",
     "prepare": "husky"
   },
