@@ -520,7 +520,7 @@ func (h *InputHandler) listenForEvents(ctx context.Context) {
 						// 如果删除的是当前活动session，清空当前session
 						if h.app.Session.ID == sessionID {
 							h.app.Session.ID = ""
-							fmt.Println("⚠️  当前活动session已被删除，请选择或创建新的session")
+							fmt.Println("⚠️  The current active session has been deleted. Please select or create a new session.")
 							h.displayWelcomeMessage()
 						}
 					}

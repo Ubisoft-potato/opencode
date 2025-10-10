@@ -264,7 +264,7 @@ func (b *SessionsBrowser) handleInput(ctx context.Context) {
 				continue
 			}
 
-			// 处理确认模式的输入
+			// handle confirmed mode
 			if b.confirmationMode {
 				if err := b.handleConfirmationInput(char, key); err != nil {
 					slog.Debug("Confirmation input handled", "error", err)
@@ -272,12 +272,12 @@ func (b *SessionsBrowser) handleInput(ctx context.Context) {
 				continue
 			}
 
-			// 处理普通模式的输入
+			// handle normal mode
 			if err := b.handleNormalInput(char, key); err != nil {
 				slog.Error("Error handling normal input", "error", err)
 			}
 
-			// 重新渲染（除非在确认模式）
+			// Re-render (unless in confirmation mode)
 			if !b.confirmationMode {
 				b.render()
 			}
@@ -285,7 +285,7 @@ func (b *SessionsBrowser) handleInput(ctx context.Context) {
 	}
 }
 
-// handleNormalInput 处理普通模式下的键盘输入
+// handleNormalInput Handling keyboard input in normal mode
 func (b *SessionsBrowser) handleNormalInput(char rune, key keyboard.Key) error {
 	slog.Debug("Key pressed", "char", string(char), "key", key)
 
@@ -316,17 +316,17 @@ func (b *SessionsBrowser) handleNormalInput(char rune, key keyboard.Key) error {
 	return nil
 }
 
-// handleConfirmationInput 处理确认模式下的键盘输入
+// handleConfirmationInput Handling keyboard input in confirm mode
 func (b *SessionsBrowser) handleConfirmationInput(char rune, key keyboard.Key) error {
 	slog.Debug("Confirmation input", "char", string(char), "key", key)
 
 	switch {
 	case char == 'y' || char == 'Y':
 		slog.Info("User confirmed deletion")
-		return fmt.Errorf("CONFIRMED") // 使用错误来传递确认状态
+		return fmt.Errorf("CONFIRMED") // Using errors to communicate confirmation status
 	case char == 'n' || char == 'N' || key == keyboard.KeyEsc || key == keyboard.KeyCtrlC:
 		slog.Info("User cancelled deletion")
-		return fmt.Errorf("CANCELLED") // 使用错误来传递取消状态
+		return fmt.Errorf("CANCELLED") // Using Errors to Communicate Cancellation Status
 	case key == keyboard.KeyEnter:
 		// 回车键默认取消
 		slog.Info("User pressed enter, defaulting to cancel")
@@ -349,25 +349,24 @@ func (b *SessionsBrowser) moveUp() {
 }
 
 func (b *SessionsBrowser) selectCurrentSession() {
-	// 验证选中索引
 	if b.selectedIndex < 0 || b.selectedIndex >= len(b.sessions) {
 		slog.Warn("Invalid session index for selection",
 			"selectedIndex", b.selectedIndex,
 			"totalSessions", len(b.sessions))
-		b.showError("无效的session选择")
+		b.showError("Invalid session selection")
 		return
 	}
 
 	if len(b.sessions) == 0 {
 		slog.Warn("No sessions available for selection")
-		b.showError("没有可选择的session")
+		b.showError("No session available")
 		return
 	}
 
 	session := b.sessions[b.selectedIndex]
 	if session.ID == "" {
 		slog.Warn("Selected session has empty ID", "selectedIndex", b.selectedIndex)
-		b.showError("选中的session ID无效")
+		b.showError("The selected session ID is invalid")
 		return
 	}
 
@@ -490,15 +489,13 @@ func (b *SessionsBrowser) deleteCurrentSession() {
 	session := b.sessions[b.selectedIndex]
 	slog.Info("Starting session deletion process", "sessionID", session.ID, "title", session.Title)
 
-	// 显示确认对话框并等待用户输入
 	confirmed := b.confirmDeletion(session)
 	if !confirmed {
 		slog.Info("Session deletion cancelled by user")
-		b.render() // 重新渲染正常界面
+		b.render()
 		return
 	}
 
-	// 执行删除操作
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -506,32 +503,32 @@ func (b *SessionsBrowser) deleteCurrentSession() {
 	err := b.app.DeleteSession(ctx, session.ID)
 	if err != nil {
 		slog.Error("Failed to delete session", "error", err, "sessionID", session.ID)
-		b.showError(fmt.Sprintf("删除session失败: %v", err))
+		b.showError(fmt.Sprintf("del session error: %v", err))
 		return
 	}
 
 	slog.Info("Session deleted successfully", "title", session.Title, "id", session.ID)
 
-	// 从本地列表中移除session
+	// Remove the session from the local list
 	b.removeSessionFromList(b.selectedIndex)
 
-	// 调整选中索引
+	// Adjust the selected index
 	if b.selectedIndex >= len(b.sessions) && len(b.sessions) > 0 {
 		b.selectedIndex = len(b.sessions) - 1
 	}
 
-	// 通过IPC通知其他面板session已删除
+	// Notify other panels via IPC that the session has been deleted
 	b.notifySessionDeleted(session.ID)
 
-	// 显示成功消息
+	// Display success message
 	b.showSuccess(fmt.Sprintf("Session '%s' 已成功删除", session.Title))
 
-	// 立即刷新显示
+	// Refresh the display immediately
 	b.render()
 }
 
 func (b *SessionsBrowser) render() {
-	// 不在确认模式下才渲染主界面
+	// Render the main interface only when not in confirmation mode
 	if b.confirmationMode {
 		return
 	}
@@ -560,8 +557,8 @@ func (b *SessionsBrowser) render() {
 
 	// Render sessions
 	if len(b.sessions) == 0 {
-		fmt.Printf("│ %-*s │\n", width-4, "没有可用的session")
-		fmt.Printf("│ %-*s │\n", width-4, "按 'n' 创建新session")
+		fmt.Printf("│ %-*s │\n", width-4, "No session available")
+		fmt.Printf("│ %-*s │\n", width-4, "enter 'n' create new session")
 		fmt.Printf("│ %-*s │\n", width-4, "")
 	} else {
 		startIdx := 0
@@ -616,7 +613,7 @@ func (b *SessionsBrowser) render() {
 	fmt.Printf("├%s┤\n", strings.Repeat("─", width-2))
 
 	// Status line 1: basic info
-	debugInfo1 := fmt.Sprintf("状态: 选中=%d/%d | 键盘=%v | 模式=%s",
+	debugInfo1 := fmt.Sprintf("status: Selected=%d/%d | keyboard=%v | model=%s",
 		b.selectedIndex,
 		func() int {
 			if len(b.sessions) == 0 { return 0 }
@@ -624,9 +621,9 @@ func (b *SessionsBrowser) render() {
 		}(),
 		b.keyboardEnabled,
 		func() string {
-			if b.confirmationMode { return "确认" }
-			if b.exitRequested { return "退出中" }
-			return "正常"
+			if b.confirmationMode { return "confirm" }
+			if b.exitRequested { return "exiting" }
+			return "normal"
 		}())
 	if len(debugInfo1) > width-4 {
 		debugInfo1 = debugInfo1[:width-7] + "..."
@@ -634,13 +631,13 @@ func (b *SessionsBrowser) render() {
 	fmt.Printf("│ %-*s │\n", width-4, debugInfo1)
 
 	// Status line 2: error info
-	debugInfo2 := fmt.Sprintf("错误: 键盘错误=%d/%d | 上次错误=%s",
+	debugInfo2 := fmt.Sprintf("error: keyboard error=%d/%d | lastErr=%s",
 		b.keyboardErrors, b.maxRetries,
 		func() string {
 			if b.lastKeyboardError.IsZero() {
 				return "无"
 			}
-			return fmt.Sprintf("%.1f秒前", time.Since(b.lastKeyboardError).Seconds())
+			return fmt.Sprintf("%.1fs ago", time.Since(b.lastKeyboardError).Seconds())
 		}())
 	if len(debugInfo2) > width-4 {
 		debugInfo2 = debugInfo2[:width-7] + "..."
@@ -648,14 +645,14 @@ func (b *SessionsBrowser) render() {
 	fmt.Printf("│ %-*s │\n", width-4, debugInfo2)
 
 	// Help text
-	help := "j/k: 移动 | Enter: 选择 | n: 新建 | d: 删除 | r: 刷新 | ESC: 退出"
+	help := "j/k: move | Enter: select | n: create | d: delete | r: refresh | ESC: exit"
 	if len(help) > width-4 {
 		help = help[:width-7] + "..."
 	}
 	fmt.Printf("│ %-*s │\n", width-4, help)
 	fmt.Printf("└%s┘\n", strings.Repeat("─", width-2))
 
-	// 定期输出状态监控
+
 	slog.Debug("Rendered sessions browser",
 		"keyboardEnabled", b.keyboardEnabled,
 		"confirmationMode", b.confirmationMode,
@@ -664,7 +661,7 @@ func (b *SessionsBrowser) render() {
 		"selectedIndex", b.selectedIndex,
 		"sessionsCount", len(b.sessions))
 
-	// 检查异常状态并记录警告
+
 	if b.keyboardErrors > 0 {
 		slog.Warn("Keyboard errors detected", "errorCount", b.keyboardErrors, "maxRetries", b.maxRetries)
 	}
@@ -693,27 +690,27 @@ func getTerminalSize() (width, height int) {
 	return width, height
 }
 
-// confirmDeletion 显示确认对话框并使用键盘输入处理
+// confirmDeletion Display a confirmation dialog and handle keyboard input
 func (b *SessionsBrowser) confirmDeletion(session opencode.Session) bool {
-	// 安全切换到确认模式
+	// Safely switch to confirmation mode
 	b.enterConfirmationMode()
 	defer b.exitConfirmationMode()
 
 	slog.Info("Entering confirmation mode for session deletion")
 
-	// 显示确认信息
+	// Display confirmation message
 	fmt.Print("\033[2J\033[H") // 清屏
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("                    确认删除Session")
+	fmt.Println("                    Confirm Session Deletion")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
-	fmt.Printf("您确定要删除以下session吗？\n")
-	fmt.Printf("标题: %s\n", session.Title)
+	fmt.Printf("Are you sure you want to delete the following session?？\n")
+	fmt.Printf("Title: %s\n", session.Title)
 	fmt.Printf("ID:   %s\n", session.ID)
 	fmt.Println()
-	fmt.Println("⚠️  警告: 此操作不可撤销，将永久删除session及其所有消息！")
+	fmt.Println("⚠️  Warning: This operation is irreversible and will permanently delete the session and all its messages!")
 	fmt.Println()
-	fmt.Println("按 Y 确认删除，按 N 或 ESC 取消")
+	fmt.Println("Press Y to confirm the deletion, or N or ESC to cancel.")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// 等待用户输入 - 循环直到得到明确的答案
@@ -733,24 +730,24 @@ func (b *SessionsBrowser) confirmDeletion(session opencode.Session) bool {
 
 		switch {
 		case char == 'y' || char == 'Y':
-			fmt.Println("\n✅ 确认删除")
+			fmt.Println("\n✅ Confirm Delete")
 			slog.Info("User confirmed deletion")
-			time.Sleep(500 * time.Millisecond) // 短暂停顿让用户看到确认
+			time.Sleep(500 * time.Millisecond) // Pause briefly to let the user see the confirmation
 			return true
 		case char == 'n' || char == 'N' || key == keyboard.KeyEsc:
-			fmt.Println("\n❌ 取消删除")
+			fmt.Println("\n❌ cancel delete")
 			slog.Info("User cancelled deletion")
-			time.Sleep(500 * time.Millisecond) // 短暂停顿让用户看到取消
+			time.Sleep(500 * time.Millisecond) // Pause briefly to let the user see the confirmation
 			return false
 		case key == keyboard.KeyCtrlC:
-			fmt.Println("\n⚠️  Ctrl+C pressed - 取消删除并请求退出")
+			fmt.Println("\n⚠️  Ctrl+C pressed - Cancel deletion and request exit")
 			slog.Info("User pressed Ctrl+C during confirmation - cancelling and requesting exit")
 			time.Sleep(500 * time.Millisecond)
 			b.requestExit() // 请求安全退出
 			return false
 		case key == keyboard.KeyEnter:
 			// 回车键默认取消
-			fmt.Println("\n❌ 默认取消删除")
+			fmt.Println("\n❌ Default undelete")
 			slog.Info("User pressed enter, defaulting to cancel")
 			time.Sleep(500 * time.Millisecond)
 			return false
@@ -761,41 +758,41 @@ func (b *SessionsBrowser) confirmDeletion(session opencode.Session) bool {
 	}
 }
 
-// showError 显示错误信息并等待用户确认
+// showError Displays an error message and waits for user confirmation
 func (b *SessionsBrowser) showError(message string) {
 	slog.Error("Showing error to user", "message", message)
 	fmt.Print("\033[2J\033[H") // 清屏
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("                       错误")
+	fmt.Println("                       Error")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 	fmt.Printf("❌ %s\n", message)
 	fmt.Println()
-	fmt.Println("按任意键继续...")
+	fmt.Println("Press any key to continue...")
 
 	b.waitForAnyKey()
 }
 
-// showSuccess 显示成功信息
+// showSuccess show success message
 func (b *SessionsBrowser) showSuccess(message string) {
 	slog.Info("Showing success to user", "message", message)
 	fmt.Print("\033[2J\033[H") // 清屏
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("                       成功")
+	fmt.Println("                       success")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 	fmt.Printf("✅ %s\n", message)
 	fmt.Println()
-	fmt.Println("按任意键继续...")
+	fmt.Println("Press any key to continue...")
 
 	b.waitForAnyKey()
 }
 
-// waitForAnyKey 等待用户按任意键
+// waitForAnyKey Wait for the user to press any key
 func (b *SessionsBrowser) waitForAnyKey() {
 	if !b.keyboardEnabled {
 		slog.Warn("Keyboard not enabled, cannot wait for key")
-		time.Sleep(2 * time.Second) // 2秒后自动继续
+		time.Sleep(2 * time.Second) // Automatically continue after 2 seconds
 		return
 	}
 
@@ -803,7 +800,7 @@ func (b *SessionsBrowser) waitForAnyKey() {
 		_, _, err := keyboard.GetKey()
 		if err != nil {
 			slog.Error("Failed to get key while waiting", "error", err)
-			time.Sleep(2 * time.Second) // 出错时等待2秒
+			time.Sleep(2 * time.Second) // Wait 2 seconds on error
 			return
 		}
 		// 任意按键都会继续
@@ -811,24 +808,24 @@ func (b *SessionsBrowser) waitForAnyKey() {
 	}
 }
 
-// removeSessionFromList 从本地列表中移除session
+// removeSessionFromList Remove the session from the local list
 func (b *SessionsBrowser) removeSessionFromList(index int) {
 	if index < 0 || index >= len(b.sessions) {
 		return
 	}
 
-	// 从切片中移除元素
+	// Remove elements from a slice
 	b.sessions = append(b.sessions[:index], b.sessions[index+1:]...)
 }
 
-// notifySessionDeleted 通过IPC通知其他面板session已删除
+//notifySessionDeleted Notify other panels via IPC that the session has been deleted
 func (b *SessionsBrowser) notifySessionDeleted(sessionID string) {
 	if b.ipcClient == nil {
 		slog.Warn("IPC client is nil, cannot send session deleted event", "sessionID", sessionID)
 		return
 	}
 
-	// 创建session删除事件
+	// Create a session deletion event
 	sessionData := &ipc.SessionChangedData{
 		SessionID: sessionID,
 	}
@@ -849,7 +846,7 @@ func (b *SessionsBrowser) notifySessionDeleted(sessionID string) {
 	}
 }
 
-// initializeKeyboard 初始化键盘输入，带重试逻辑
+// initializeKeyboard Initialize keyboard input with retry logic
 func (b *SessionsBrowser) initializeKeyboard() error {
 	// Check if we're in a tmux environment and have proper stdin
 	if !isStdinTerminal() {
@@ -871,7 +868,7 @@ func (b *SessionsBrowser) initializeKeyboard() error {
 		if err := keyboard.Open(); err != nil {
 			lastErr = err
 			slog.Warn("Keyboard initialization failed", "attempt", attempt, "error", err, "isTmux", isTmuxEnvironment())
-			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond) // 递增延迟
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond) // Incremental Delay
 			continue
 		}
 
@@ -885,7 +882,7 @@ func (b *SessionsBrowser) initializeKeyboard() error {
 	return fmt.Errorf("failed to initialize keyboard after %d attempts: %w", b.maxRetries, lastErr)
 }
 
-// closeKeyboard 安全关闭键盘输入
+// closeKeyboard Safely disable keyboard input
 func (b *SessionsBrowser) closeKeyboard() {
 	if b.keyboardEnabled {
 		keyboard.Close()
@@ -894,7 +891,7 @@ func (b *SessionsBrowser) closeKeyboard() {
 	}
 }
 
-// getKeyWithRetry 获取键盘输入，带错误恢复
+// getKeyWithRetry Get keyboard input with error recovery
 func (b *SessionsBrowser) getKeyWithRetry() (rune, keyboard.Key, error) {
 	char, key, err := keyboard.GetKey()
 	if err != nil {
@@ -906,27 +903,27 @@ func (b *SessionsBrowser) getKeyWithRetry() (rune, keyboard.Key, error) {
 			"errorCount", b.keyboardErrors,
 			"maxRetries", b.maxRetries)
 
-		// 如果错误次数还在可接受范围内，尝试重新初始化键盘
+		// If the number of errors is still within an acceptable range, try reinitializing the keyboard.
 		if b.keyboardErrors <= b.maxRetries {
 			slog.Info("Attempting to reinitialize keyboard", "attempt", b.keyboardErrors)
 
-			// 关闭并重新打开键盘
+			// Close and reopen the keyboard
 			b.closeKeyboard()
-			time.Sleep(500 * time.Millisecond) // 等待一下
+			time.Sleep(500 * time.Millisecond) // Wait a minute
 
 			if reinitErr := b.initializeKeyboard(); reinitErr != nil {
 				slog.Error("Failed to reinitialize keyboard", "error", reinitErr)
 				return 0, 0, fmt.Errorf("keyboard reinitialization failed: %w", reinitErr)
 			}
 
-			// 重新尝试获取键盘输入
+			// Retry to get keyboard input
 			return keyboard.GetKey()
 		}
 
 		return 0, 0, err
 	}
 
-	// 成功获取输入，重置错误计数
+	// Successfully obtained input, reset error count
 	if b.keyboardErrors > 0 {
 		slog.Info("Keyboard recovered", "previousErrors", b.keyboardErrors)
 		b.keyboardErrors = 0
@@ -935,13 +932,13 @@ func (b *SessionsBrowser) getKeyWithRetry() (rune, keyboard.Key, error) {
 	return char, key, nil
 }
 
-// requestExit 请求安全退出
+// requestExit Requests a safe exit
 func (b *SessionsBrowser) requestExit() {
 	slog.Info("Exit requested by user")
 	b.exitRequested = true
 }
 
-// enterConfirmationMode 安全进入确认模式
+// enterConfirmationMode Secure entry confirmation mode
 func (b *SessionsBrowser) enterConfirmationMode() {
 	if b.confirmationMode {
 		slog.Warn("Already in confirmation mode")
@@ -951,7 +948,7 @@ func (b *SessionsBrowser) enterConfirmationMode() {
 	slog.Info("Entered confirmation mode")
 }
 
-// exitConfirmationMode 安全退出确认模式
+//exitConfirmationMode Safe exit confirmation mode
 func (b *SessionsBrowser) exitConfirmationMode() {
 	if !b.confirmationMode {
 		slog.Warn("Not in confirmation mode")
@@ -961,7 +958,7 @@ func (b *SessionsBrowser) exitConfirmationMode() {
 	slog.Info("Exited confirmation mode")
 }
 
-// getSystemStatus 获取系统状态信息
+// getSystemStatus Get system status information
 func (b *SessionsBrowser) getSystemStatus() map[string]interface{} {
 	return map[string]interface{}{
 		"keyboardEnabled":    b.keyboardEnabled,

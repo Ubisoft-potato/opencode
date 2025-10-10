@@ -316,7 +316,6 @@ func (r *MessageRenderer) listenForEvents(ctx context.Context) {
 				if sessionID != "" {
 					slog.Info("Messages pane received session deleted event", "sessionID", sessionID)
 
-					// 如果删除的是当前显示的session，清空显示
 					if r.app.Session.ID == sessionID {
 						r.app.Session.ID = ""
 						r.app.Messages = nil
@@ -334,7 +333,7 @@ func (r *MessageRenderer) listenForEvents(ctx context.Context) {
 func (r *MessageRenderer) loadMessagesForSession(sessionID string) {
 	if sessionID == "" {
 		slog.Warn("Cannot load messages: sessionID is empty")
-		r.showLoadingError("SessionID为空，无法加载消息")
+		r.showLoadingError("SessionID is null can not load message ")
 		return
 	}
 
@@ -343,7 +342,6 @@ func (r *MessageRenderer) loadMessagesForSession(sessionID string) {
 	// Clear existing messages immediately to show the switch
 	r.app.Messages = nil
 
-	// 添加超时控制
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -351,9 +349,8 @@ func (r *MessageRenderer) loadMessagesForSession(sessionID string) {
 	messages, err := r.app.ListMessages(ctx, sessionID)
 	if err != nil {
 		slog.Error("Failed to load messages", "error", err, "sessionID", sessionID)
-		r.showLoadingError(fmt.Sprintf("加载session消息失败: %v", err))
+		r.showLoadingError(fmt.Sprintf("load session error: %v", err))
 
-		// Fallback: 至少清空当前消息，避免显示错误的历史消息
 		r.app.Messages = nil
 		return
 	}
@@ -370,21 +367,15 @@ func (r *MessageRenderer) loadMessagesForSession(sessionID string) {
 			return "unknown"
 		}())
 
-	// 确保app的session信息是最新的
 	if r.app.Session == nil {
 		slog.Warn("App session is nil, creating new session object")
-		// 这里可以根据需要创建一个基本的session对象
 	}
 
-	// 立即触发渲染
 	r.HandleEvent("messages_loaded")
 }
 
-// showLoadingError 显示加载错误（可以在界面上体现）
 func (r *MessageRenderer) showLoadingError(errorMsg string) {
 	slog.Error("Message loading error", "error", errorMsg)
-	// 这里可以设置一个错误状态，在render中显示
-	// 暂时只记录日志
 }
 
 // getSessionDisplayName returns a user-friendly session name
@@ -565,30 +556,29 @@ func wordWrap(text string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// extractSessionID 从IPC事件中提取sessionID，支持多种数据格式
+// extractSessionID Extract sessionID from IPC events, supporting multiple data formats
 func (r *MessageRenderer) extractSessionID(event *ipc.Event) string {
 	if event.Data == nil {
 		slog.Warn("Event data is nil", "eventType", event.Type)
 		return ""
 	}
 
-	// 方法1: 尝试直接类型断言为SessionChangedData
+	// Method 1: Try direct type assertion for SessionChangedData
 	if sessionData, ok := event.Data.(*ipc.SessionChangedData); ok {
 		slog.Debug("Successfully extracted sessionID via direct type assertion", "sessionID", sessionData.SessionID)
 		return sessionData.SessionID
 	}
 
-	// 方法2: 尝试类型断言为SessionChangedData (非指针)
+	// Method 2: Try to type assert SessionChangedData (non-pointer)
 	if sessionData, ok := event.Data.(ipc.SessionChangedData); ok {
 		slog.Debug("Successfully extracted sessionID via value type assertion", "sessionID", sessionData.SessionID)
 		return sessionData.SessionID
 	}
 
-	// 方法3: 尝试作为map[string]interface{}处理
+	// Method 3: Try to process it as map[string]interface{}
 	if data, ok := event.Data.(map[string]interface{}); ok {
 		slog.Debug("Event data is map[string]interface{}", "keys", getMapKeys(data))
 
-		// 尝试多种可能的字段名
 		possibleKeys := []string{"session_id", "SessionID", "sessionId", "sessionID"}
 		for _, key := range possibleKeys {
 			if value, exists := data[key]; exists {
@@ -603,7 +593,6 @@ func (r *MessageRenderer) extractSessionID(event *ipc.Event) string {
 		slog.Warn("No valid sessionID found in map data", "availableKeys", getMapKeys(data))
 	}
 
-	// 方法4: 尝试JSON重新解析 (最后手段)
 	if jsonBytes, err := json.Marshal(event.Data); err == nil {
 		var sessionData ipc.SessionChangedData
 		if err := json.Unmarshal(jsonBytes, &sessionData); err == nil && sessionData.SessionID != "" {
@@ -616,7 +605,6 @@ func (r *MessageRenderer) extractSessionID(event *ipc.Event) string {
 	return ""
 }
 
-// getMapKeys 获取map的所有键，用于调试
 func getMapKeys(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
