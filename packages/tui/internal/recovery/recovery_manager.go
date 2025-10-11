@@ -11,6 +11,7 @@ import (
 
 	"github.com/sst/opencode/internal/persistence"
 	"github.com/sst/opencode/internal/state"
+	"github.com/sst/opencode/internal/types"
 )
 
 // RecoveryManager handles system failures and state recovery
@@ -206,7 +207,7 @@ func (rm *RecoveryManager) recoverFromPanelCrash(panelID string) error {
 	event := state.StateEvent{
 		ID:          "recovery_" + time.Now().Format("20060102150405"),
 		Type:        state.EventStateSync,
-		Data:        state.StateSyncPayload{State: currentState},
+		Data:        types.StateSyncPayload{State: currentState},
 		Version:     currentState.Version.Version,
 		SourcePanel: "recovery",
 		Timestamp:   time.Now(),

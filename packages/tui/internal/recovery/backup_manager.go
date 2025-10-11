@@ -443,7 +443,7 @@ func (bm *BackupManager) ForceBackup() (*BackupInfo, error) {
 // GetBackupHealth returns the health status of the backup system
 func (bm *BackupManager) GetBackupHealth() BackupHealth {
 	stats := bm.GetStatistics()
-	backups, err := bm.ListBackups()
+	backups, _ := bm.ListBackups()
 
 	health := BackupHealth{
 		IsHealthy:        true,

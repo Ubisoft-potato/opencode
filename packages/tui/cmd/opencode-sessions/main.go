@@ -74,6 +74,8 @@ func (p SessionsPanel) Init() tea.Cmd {
 		time.Sleep(100 * time.Millisecond) // Wait for connection
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
 			return StateLoadedMsg{State: currentState}
+		}else{
+      log.Printf("Sessions panel initial state err:%v",err)
 		}
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
@@ -163,6 +165,8 @@ func (p SessionsPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (p SessionsPanel) selectCurrentSession() tea.Cmd {
 	if p.currentIndex >= 0 && p.currentIndex < len(p.sessions) {
 		session := p.sessions[p.currentIndex]
+		log.Printf("[SESSIONS] Selecting session: %s (index: %d)", session.ID, p.currentIndex)
+
 		return func() tea.Msg {
 			update := state.StateUpdate{
 				Type:        state.SessionChanged,
@@ -171,13 +175,17 @@ func (p SessionsPanel) selectCurrentSession() tea.Cmd {
 				Timestamp:   time.Now(),
 			}
 
+			log.Printf("[SESSIONS] Sending SessionChanged event for session: %s", session.ID)
 			if err := p.ipcClient.SendStateUpdate(update); err != nil {
+				log.Printf("[SESSIONS] Failed to send SessionChanged event: %v", err)
 				return ErrorMsg{Error: err}
 			}
 
+			log.Printf("[SESSIONS] Successfully sent SessionChanged event")
 			return SessionSelectedMsg{SessionID: session.ID}
 		}
 	}
+	log.Printf("[SESSIONS] Cannot select session - invalid index: %d (total: %d)", p.currentIndex, len(p.sessions))
 	return nil
 }
 
@@ -222,7 +230,7 @@ func (p SessionsPanel) deleteCurrentSession() tea.Cmd {
 		sessionID := p.sessions[p.currentIndex].ID
 		return func() tea.Msg {
 			// Delete via API
-			if err := p.client.Session.Delete(p.ctx, sessionID, opencode.SessionDeleteParams{}); err != nil {
+			if _, err := p.client.Session.Delete(p.ctx, sessionID, opencode.SessionDeleteParams{}); err != nil {
 				return ErrorMsg{Error: fmt.Errorf("failed to delete session: %w", err)}
 			}
 
@@ -260,7 +268,7 @@ func (p SessionsPanel) refreshSessions() tea.Cmd {
 				Title:        session.Title,
 				CreatedAt:    time.Unix(int64(session.Time.Created), 0),
 				UpdatedAt:    time.Unix(int64(session.Time.Updated), 0),
-				MessageCount: int(session.MessageCount),
+				MessageCount: 0,
 				IsActive:     true,
 			}
 		}
@@ -391,8 +399,8 @@ func (p SessionsPanel) renderSessionsList() string {
 		var style styles.Style
 		if isSelected {
 			style = styles.NewStyle().
-				Background(t.Selection()).
-				Foreground(t.SelectionText()).
+				Background(t.BackgroundElement()).
+				Foreground(t.Text()).
 				Padding(0, 1)
 		} else {
 			style = styles.NewStyle().
@@ -473,7 +481,12 @@ func main() {
 	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
 
 	// Initialize theme
-	theme.SetTheme("opencode")
+	if err := theme.LoadThemesFromJSON(); err != nil {
+		log.Fatal("Failed to load themes:", err)
+	}
+	if err := theme.SetTheme("opencode"); err != nil {
+		log.Fatal("Failed to set theme:", err)
+	}
 
 	// Create and run panel
 	panel := NewSessionsPanel(httpClient, socketPath)
@@ -485,7 +498,7 @@ func main() {
 	)
 
 	// Handle signals
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 

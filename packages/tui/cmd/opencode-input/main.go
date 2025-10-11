@@ -18,6 +18,7 @@ import (
 	"github.com/sst/opencode/internal/state"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
+	"github.com/sst/opencode/internal/types"
 )
 
 // InputPanel manages the user input panel
@@ -74,21 +75,43 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 func (p InputPanel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
-	// Connect to IPC server
+	// Connect to IPC server with retry
 	cmds = append(cmds, func() tea.Msg {
-		if err := p.ipcClient.Connect(); err != nil {
-			return ErrorMsg{Error: fmt.Errorf("failed to connect to IPC: %w", err)}
+		socketPath := os.Getenv("OPENCODE_SOCKET")
+		log.Printf("[INPUT] Attempting to connect to IPC server at %s", socketPath)
+
+		// Try to connect with retries
+		var lastErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if err := p.ipcClient.Connect(); err != nil {
+				lastErr = err
+				log.Printf("[INPUT] Connection attempt %d failed: %v", attempt, err)
+				if attempt < 3 {
+					time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+				}
+				continue
+			}
+			log.Printf("[INPUT] Successfully connected to IPC server on attempt %d", attempt)
+			return ConnectedMsg{}
 		}
-		return ConnectedMsg{}
+
+		return ErrorMsg{Error: fmt.Errorf("failed to connect to IPC after 3 attempts: %w", lastErr)}
 	})
 
-	// Request initial state
+	// Request initial state with better error handling
 	cmds = append(cmds, func() tea.Msg {
-		time.Sleep(100 * time.Millisecond) // Wait for connection
+		// Wait longer for connection to establish
+		time.Sleep(500 * time.Millisecond)
+
+		log.Printf("[INPUT] Requesting initial state from IPC server")
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
+			log.Printf("[INPUT] Successfully loaded initial state")
 			return StateLoadedMsg{State: currentState}
+		} else {
+			log.Printf("[INPUT] Failed to load initial state: %v", err)
+			// Don't treat this as fatal - continue with empty state
+			return StateLoadedMsg{State: nil}
 		}
-		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
 	return tea.Batch(cmds...)
@@ -110,14 +133,28 @@ func (p InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return p, nil
 
 	case StateLoadedMsg:
-		p.currentSessionID = msg.State.CurrentSessionID
-		p.buffer = msg.State.Input.Buffer
-		p.cursorPosition = msg.State.Input.CursorPosition
-		p.selectionStart = msg.State.Input.SelectionStart
-		p.selectionEnd = msg.State.Input.SelectionEnd
-		p.mode = msg.State.Input.Mode
-		p.history = msg.State.Input.History
-		p.historyIndex = msg.State.Input.HistoryIndex
+		if msg.State != nil {
+			log.Printf("[INPUT] Loading state from IPC server")
+			p.currentSessionID = msg.State.CurrentSessionID
+			p.buffer = msg.State.Input.Buffer
+			p.cursorPosition = msg.State.Input.CursorPosition
+			p.selectionStart = msg.State.Input.SelectionStart
+			p.selectionEnd = msg.State.Input.SelectionEnd
+			p.mode = msg.State.Input.Mode
+			p.history = msg.State.Input.History
+			p.historyIndex = msg.State.Input.HistoryIndex
+		} else {
+			log.Printf("[INPUT] No state available, using defaults")
+			// Initialize with default values
+			p.currentSessionID = ""
+			p.buffer = ""
+			p.cursorPosition = 0
+			p.selectionStart = 0
+			p.selectionEnd = 0
+			p.mode = "normal"
+			p.history = make([]string, 0)
+			p.historyIndex = -1
+		}
 		return p, nil
 
 	case ErrorMsg:
@@ -238,8 +275,22 @@ func (p InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		// Handle character input
-		if len(msg.String()) == 1 {
-			return p.insertCharacter(msg.String())
+		keyStr := msg.String()
+		log.Printf("[INPUT] Key pressed: %q (length: %d, runes: %d)", keyStr, len(keyStr), len([]rune(keyStr)))
+
+		// Check if it's a printable character (including space and Unicode)
+		runes := []rune(keyStr)
+		if len(runes) == 1 {
+			char := runes[0]
+			// Allow printable characters including space (32) and Unicode characters
+			if char >= 32 || char == 9 { // 32 = space, 9 = tab
+				log.Printf("[INPUT] Inserting character: %q (Unicode: U+%04X)", keyStr, char)
+				return p.insertCharacter(keyStr)
+			} else {
+				log.Printf("[INPUT] Ignoring non-printable character: %q (Unicode: U+%04X)", keyStr, char)
+			}
+		} else if len(runes) > 1 {
+			log.Printf("[INPUT] Multi-character key sequence ignored: %q", keyStr)
 		}
 	}
 
@@ -540,7 +591,7 @@ func (p *InputPanel) handleSessionChanged(event state.StateEvent) error {
 }
 
 func (p *InputPanel) handleStateSync(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.StateSyncPayload); ok {
+	if payload, ok := event.Data.(types.StateSyncPayload); ok {
 		p.currentSessionID = payload.State.CurrentSessionID
 		p.buffer = payload.State.Input.Buffer
 		p.cursorPosition = payload.State.Input.CursorPosition
@@ -726,7 +777,7 @@ func (p InputPanel) renderInput() string {
 
 	// Input field
 	inputStyle := styles.NewStyle().
-		Border(styles.RoundedBorder()).
+		Border(styles.RoundedBorder).
 		BorderForeground(t.Border()).
 		Padding(1).
 		Width(p.width - 2)
@@ -795,7 +846,7 @@ Keyboard Shortcuts:
 
 	return styles.NewStyle().
 		Foreground(t.Info()).
-		Border(styles.RoundedBorder()).
+		Border(styles.RoundedBorder).
 		BorderForeground(t.Border()).
 		Padding(1).
 		Render(strings.TrimSpace(helpContent))
@@ -850,7 +901,12 @@ func main() {
 	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
 
 	// Initialize theme
-	theme.SetTheme("opencode")
+	if err := theme.LoadThemesFromJSON(); err != nil {
+		log.Fatal("Failed to load themes:", err)
+	}
+	if err := theme.SetTheme("opencode"); err != nil {
+		log.Fatal("Failed to set theme:", err)
+	}
 
 	// Create and run panel
 	panel := NewInputPanel(httpClient, socketPath)
@@ -862,7 +918,7 @@ func main() {
 	)
 
 	// Handle signals
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 

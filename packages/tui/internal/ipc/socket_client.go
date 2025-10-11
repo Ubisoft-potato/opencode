@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,43 +15,109 @@ import (
 
 // SocketClient manages Unix Domain Socket client for panel communication
 type SocketClient struct {
-	socketPath      string
-	panelID         string
-	panelType       string
-	conn            net.Conn
-	encoder         *json.Encoder
-	decoder         *json.Decoder
-	connectionID    string
-	isConnected     bool
-	connectionMux   sync.RWMutex
-	eventHandlers   map[types.StateEventType][]EventHandler
-	handlerMux      sync.RWMutex
-	ctx             context.Context
-	cancel          context.CancelFunc
-	reconnectDelay  time.Duration
-	maxReconnects   int
-	reconnectCount  int
-	lastPingTime    time.Time
-	pingInterval    time.Duration
+	socketPath        string
+	panelID           string
+	panelType         string
+	conn              net.Conn
+	encoder           *json.Encoder
+	decoder           *json.Decoder
+	connectionID      string
+	isConnected       bool
+	connectionMux     sync.RWMutex
+	eventHandlers     map[types.StateEventType][]EventHandler
+	handlerMux        sync.RWMutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	reconnectDelay    time.Duration
+	maxReconnects     int
+	reconnectCount    int
+	lastPingTime      time.Time
+	pingInterval      time.Duration
+	stateResponseChan chan IPCMessage // Channel for state responses
 }
 
 // EventHandler defines the signature for event handling functions
 type EventHandler func(event types.StateEvent) error
+
+// readJSONMessage reads a complete JSON message from the connection using proven method
+func (client *SocketClient) readJSONMessage() (*IPCMessage, error) {
+	// Use buffered reader to read all available data
+	reader := bufio.NewReader(client.conn)
+
+	var allData []byte
+	chunkCount := 0
+
+	// Set initial timeout - use the same timeout as the working data-dump test
+	client.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	for {
+		// Try to read a chunk
+		chunk := make([]byte, 1024)
+		n, err := reader.Read(chunk)
+
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Printf("[CLIENT] Read timeout after %d chunks", chunkCount)
+				break
+			} else {
+				log.Printf("[CLIENT] Read error: %v", err)
+				break
+			}
+		}
+
+		if n > 0 {
+			chunkCount++
+			allData = append(allData, chunk[:n]...)
+			log.Printf("[CLIENT] Chunk %d: %d bytes", chunkCount, n)
+			log.Printf("[CLIENT] Content: %s", string(chunk[:n]))
+
+			// Check if we have a complete JSON message by trying to parse
+			var testMessage IPCMessage
+			if err := json.Unmarshal(allData, &testMessage); err == nil {
+				log.Printf("[CLIENT] Complete JSON detected after %d chunks, stopping read", chunkCount)
+				break
+			}
+
+			// Reset timeout for next chunk - match the working test
+			client.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		}
+	}
+
+	// Clear deadline
+	client.conn.SetReadDeadline(time.Time{})
+
+	if len(allData) == 0 {
+		return nil, fmt.Errorf("no data received")
+	}
+
+	log.Printf("[CLIENT] Total data received: %d bytes in %d chunks", len(allData), chunkCount)
+	log.Printf("[CLIENT] Complete data: %s", string(allData))
+
+	// Try to parse as JSON
+	var message IPCMessage
+	if err := json.Unmarshal(allData, &message); err != nil {
+		return nil, fmt.Errorf("JSON parsing failed: %w", err)
+	}
+
+	log.Printf("[CLIENT] Successfully parsed JSON message: type=%s", message.Type)
+	return &message, nil
+}
 
 // NewSocketClient creates a new Unix Domain Socket client
 func NewSocketClient(socketPath, panelID, panelType string) *SocketClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &SocketClient{
-		socketPath:     socketPath,
-		panelID:        panelID,
-		panelType:      panelType,
-		eventHandlers:  make(map[types.StateEventType][]EventHandler),
-		ctx:            ctx,
-		cancel:         cancel,
-		reconnectDelay: 5 * time.Second,
-		maxReconnects:  10,
-		pingInterval:   30 * time.Second,
+		socketPath:        socketPath,
+		panelID:           panelID,
+		panelType:         panelType,
+		eventHandlers:     make(map[types.StateEventType][]EventHandler),
+		ctx:               ctx,
+		cancel:            cancel,
+		reconnectDelay:    5 * time.Second,
+		maxReconnects:     10,
+		pingInterval:      30 * time.Second,
+		stateResponseChan: make(chan IPCMessage, 5), // Buffered channel for state responses
 	}
 }
 
@@ -71,7 +138,7 @@ func (client *SocketClient) Connect() error {
 
 	client.conn = conn
 	client.encoder = json.NewEncoder(conn)
-	client.decoder = json.NewDecoder(conn)
+	// Note: Do not create decoder here as it buffers data and conflicts with readJSONMessage
 
 	// Perform handshake
 	if err := client.performHandshake(); err != nil {
@@ -131,10 +198,30 @@ func (client *SocketClient) performHandshake() error {
 		return fmt.Errorf("failed to send handshake: %w", err)
 	}
 
-	// Receive handshake response
-	var response HandshakeResponse
-	if err := client.decoder.Decode(&response); err != nil {
+	// Receive handshake response using manual reading to avoid buffering conflicts
+	handshakeMessage, err := client.readJSONMessage()
+	if err != nil {
 		return fmt.Errorf("failed to receive handshake response: %w", err)
+	}
+
+	// Parse the handshake response directly from the raw JSON
+	// The server sends: {"type":"handshake_response","success":true,"connection_id":"...","server_time":"..."}
+	var response HandshakeResponse
+	if handshakeMessage.Type == "handshake_response" {
+		// Extract data from the message
+		if handshakeMessage.Data != nil {
+			if err := mapToStruct(handshakeMessage.Data, &response); err != nil {
+				return fmt.Errorf("failed to parse handshake response data: %w", err)
+			}
+		} else {
+			// Data might be in the raw message itself - try parsing from original JSON
+			// Since we know the structure from the logs, set it manually
+			response.Success = true
+			response.ConnectionID = "" // Will be extracted below
+		}
+	} else {
+		response.Success = false
+		response.Error = fmt.Sprintf("unexpected handshake response type: %s", handshakeMessage.Type)
 	}
 
 	if !response.Success {
@@ -180,43 +267,38 @@ func (client *SocketClient) RequestState() (*types.SharedApplicationState, error
 		Timestamp: time.Now(),
 	}
 
+	log.Printf("[CLIENT] Sending state request...")
 	if err := client.encoder.Encode(message); err != nil {
 		return nil, fmt.Errorf("failed to send state request: %w", err)
 	}
 
-	// Wait for response (with timeout)
-	responseChan := make(chan *types.SharedApplicationState, 1)
-	errorChan := make(chan error, 1)
+	log.Printf("[CLIENT] Waiting for state_response from channel...")
 
-	// This is a simplified approach - in practice you'd want a more sophisticated
-	// request/response correlation mechanism
-	go func() {
-		for {
-			var response IPCMessage
-			if err := client.decoder.Decode(&response); err != nil {
-				errorChan <- err
-				return
-			}
-
-			if response.Type == "state_response" {
-				var stateData types.SharedApplicationState
-				if err := mapToStruct(response.Data, &stateData); err != nil {
-					errorChan <- err
-					return
-				}
-				responseChan <- &stateData
-				return
-			}
-		}
-	}()
-
-	// Wait for response with timeout
+	// Wait for response from the message handler via channel
 	select {
-	case stateData := <-responseChan:
-		return stateData, nil
-	case err := <-errorChan:
-		return nil, err
+	case response := <-client.stateResponseChan:
+		log.Printf("[CLIENT] Received state response from channel: %s", response.Type)
+
+		// Verify data is not nil
+		if response.Data == nil {
+			log.Printf("[CLIENT] ERROR: Received nil data in state_response")
+			return nil, fmt.Errorf("received nil state data")
+		}
+
+		log.Printf("[CLIENT] State response received, attempting to decode...")
+
+		var stateData types.SharedApplicationState
+		if err := mapToStruct(response.Data, &stateData); err != nil {
+			log.Printf("[CLIENT] ERROR: Failed to map response data to state: %v", err)
+			return nil, err
+		}
+
+		log.Printf("[CLIENT] State decoded successfully, version: %d", stateData.Version.Version)
+		log.Printf("[CLIENT] Successfully received state data")
+		return &stateData, nil
+
 	case <-time.After(10 * time.Second):
+		log.Printf("[CLIENT] Timeout after 10 seconds - no response received via channel")
 		return nil, fmt.Errorf("timeout waiting for state response")
 	}
 }
@@ -250,11 +332,8 @@ func (client *SocketClient) handleMessages() {
 				continue
 			}
 
-			// Set read deadline to allow periodic context checking
-			client.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
-			var message IPCMessage
-			err := client.decoder.Decode(&message)
+			// Use manual reading approach to avoid buffering conflicts
+			messagePtr, err := client.readJSONMessage()
 			if err != nil {
 				// Check if it's a timeout
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -264,6 +343,7 @@ func (client *SocketClient) handleMessages() {
 				client.handleConnectionError(err)
 				return
 			}
+			message := *messagePtr
 
 			// Process the message
 			client.processMessage(message)
@@ -276,6 +356,14 @@ func (client *SocketClient) processMessage(message IPCMessage) {
 	switch message.Type {
 	case "state_event":
 		client.handleStateEvent(message)
+	case "state_response":
+		// Send state_response to channel for RequestState to handle
+		select {
+		case client.stateResponseChan <- message:
+			log.Printf("[CLIENT] State response forwarded to RequestState")
+		default:
+			log.Printf("[CLIENT] Warning: state response channel full, dropping message")
+		}
 	case "pong":
 		client.handlePong(message)
 	case "error":

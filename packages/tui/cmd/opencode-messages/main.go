@@ -80,7 +80,9 @@ func (p MessagesPanel) Init() tea.Cmd {
 		time.Sleep(100 * time.Millisecond) // Wait for connection
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
 			return StateLoadedMsg{State: currentState}
-		}
+		}else{
+     		  log.Printf("Sessions panel initial state err:%v",err)
+    }
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
@@ -215,7 +217,13 @@ func (p MessagesPanel) refreshMessages() tea.Cmd {
 			switch msg := message.Info.AsUnion().(type) {
 			case opencode.UserMessage:
 				messageType = "user"
-				content = msg.Content
+				var contentParts []string
+				for _, part := range message.Parts {
+					if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+						contentParts = append(contentParts, textPart.Text)
+					}
+				}
+				content = strings.Join(contentParts, "\n")
 			case opencode.AssistantMessage:
 				messageType = "assistant"
 				// Extract content from parts if available
@@ -234,7 +242,7 @@ func (p MessagesPanel) refreshMessages() tea.Cmd {
 			}
 
 			messageInfo := types.MessageInfo{
-				ID:        message.Info.GetID(),
+				ID:        message.Info.ID,
 				SessionID: p.currentSessionID,
 				Type:      messageType,
 				Content:   content,
@@ -599,7 +607,12 @@ func main() {
 	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
 
 	// Initialize theme
-	theme.SetTheme("opencode")
+	if err := theme.LoadThemesFromJSON(); err != nil {
+		log.Fatal("Failed to load themes:", err)
+	}
+	if err := theme.SetTheme("opencode"); err != nil {
+		log.Fatal("Failed to set theme:", err)
+	}
 
 	// Create and run panel
 	panel := NewMessagesPanel(httpClient, socketPath)
@@ -611,7 +624,7 @@ func main() {
 	)
 
 	// Handle signals
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 

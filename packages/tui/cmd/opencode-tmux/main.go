@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -31,10 +32,11 @@ type TmuxOrchestrator struct {
 	cancel         context.CancelFunc
 	tmuxCommand    string
 	isRunning      bool
+	serverOnly     bool
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
-func NewTmuxOrchestrator(sessionName, socketPath, statePath string, httpClient *opencode.Client) *TmuxOrchestrator {
+func NewTmuxOrchestrator(sessionName, socketPath, statePath string, httpClient *opencode.Client, serverOnly bool) *TmuxOrchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &TmuxOrchestrator{
@@ -45,6 +47,7 @@ func NewTmuxOrchestrator(sessionName, socketPath, statePath string, httpClient *
 		ctx:         ctx,
 		cancel:      cancel,
 		tmuxCommand: "tmux",
+		serverOnly:  serverOnly,
 	}
 }
 
@@ -85,14 +88,18 @@ func (orch *TmuxOrchestrator) Start() error {
 		return fmt.Errorf("failed to create tmux session: %w", err)
 	}
 
-	// Configure panels
-	if err := orch.configurePanels(); err != nil {
-		return fmt.Errorf("failed to configure panels: %w", err)
-	}
+	if orch.serverOnly {
+		log.Printf("Server-only mode: skipping panel configuration and applications")
+	} else {
+		// Configure panels
+		if err := orch.configurePanels(); err != nil {
+			return fmt.Errorf("failed to configure panels: %w", err)
+		}
 
-	// Start panel applications
-	if err := orch.startPanelApplications(); err != nil {
-		return fmt.Errorf("failed to start panel applications: %w", err)
+		// Start panel applications
+		if err := orch.startPanelApplications(); err != nil {
+			return fmt.Errorf("failed to start panel applications: %w", err)
+		}
 	}
 
 	orch.isRunning = true
@@ -172,6 +179,20 @@ func (orch *TmuxOrchestrator) initializeStateManagement() error {
 	if err := orch.syncManager.Initialize(); err != nil {
 		return err
 	}
+
+	// Verify initialization
+	if orch.syncManager == nil {
+		return fmt.Errorf("sync manager is nil after initialization")
+	}
+
+	testState := orch.syncManager.GetState()
+	if testState == nil {
+		return fmt.Errorf("state manager returns nil state after initialization")
+	}
+
+	log.Printf("State management initialized successfully, initial version: %d", testState.Version.Version)
+	log.Printf("State details - SessionID: %s, Theme: %s, UpdateCount: %d",
+		testState.CurrentSessionID, testState.Theme, testState.UpdateCount)
 
 	return nil
 }
@@ -255,22 +276,44 @@ func (orch *TmuxOrchestrator) startPanelApplications() error {
 		"OPENCODE_SOCKET": orch.socketPath,
 	}
 
-	// Start sessions panel
-	if err := orch.startPanelApp(sessionTarget+".0", "opencode-sessions", envVars); err != nil {
-		return fmt.Errorf("failed to start sessions panel: %w", err)
+	log.Printf("Starting panel applications with IPC socket: %s", orch.socketPath)
+
+	// Wait a moment for IPC server to be fully ready
+	time.Sleep(1 * time.Second)
+
+	// Define panel configurations
+	panels := []struct {
+		pane string
+		name string
+		desc string
+	}{
+		{sessionTarget + ".0", "opencode-sessions", "sessions panel"},
+		{sessionTarget + ".1", "opencode-messages", "messages panel"},
+		{sessionTarget + ".2", "opencode-input", "input panel"},
 	}
 
-	// Start messages panel
-	if err := orch.startPanelApp(sessionTarget+".1", "opencode-messages", envVars); err != nil {
-		return fmt.Errorf("failed to start messages panel: %w", err)
+	// Start each panel with error recovery
+	for i, panel := range panels {
+		log.Printf("Starting %s (%d/3)...", panel.desc, i+1)
+
+		if err := orch.startPanelApp(panel.pane, panel.name, envVars); err != nil {
+			log.Printf("Failed to start %s: %v", panel.desc, err)
+			// Don't fail completely - continue with other panels
+			continue
+		}
+
+		// Give each panel time to start before starting the next
+		time.Sleep(500 * time.Millisecond)
+		log.Printf("✅ %s started successfully", panel.desc)
 	}
 
-	// Start input panel
-	if err := orch.startPanelApp(sessionTarget+".2", "opencode-input", envVars); err != nil {
-		return fmt.Errorf("failed to start input panel: %w", err)
+	// Verify at least one panel is running
+	if orch.verifyPanelsRunning() {
+		log.Printf("Panel startup completed - at least one panel is running")
+		return nil
+	} else {
+		return fmt.Errorf("no panels could be started successfully")
 	}
-
-	return nil
 }
 
 // startPanelApp starts an application in a specific tmux pane
@@ -283,18 +326,88 @@ func (orch *TmuxOrchestrator) startPanelApp(paneTarget, appName string, envVars 
 		}
 	}
 
-	command := fmt.Sprintf("%s%s", envCmd, appName)
+	// Build correct binary path based on app name
+	binaryPath, err := orch.getBinaryPath(appName)
+	if err != nil {
+		return fmt.Errorf("failed to get binary path for %s: %w", appName, err)
+	}
+
+	command := fmt.Sprintf("%s%s; sleep 600", envCmd, binaryPath)
+
+	log.Printf("[DEBUG] Sending command to pane %s: %s", paneTarget, command)
 
 	// Send command to pane
 	cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "send-keys", "-t", paneTarget, command, "Enter")
 	if err := cmd.Run(); err != nil {
+		log.Printf("[DEBUG] Error sending command to pane %s: %v", paneTarget, err)
+		time.Sleep(500 * time.Millisecond)
 		return fmt.Errorf("failed to send command to pane %s: %w", paneTarget, err)
 	}
+
+	log.Printf("[DEBUG] Successfully sent command to pane %s", paneTarget)
 
 	// Give the application time to start
 	time.Sleep(500 * time.Millisecond)
 
 	return nil
+}
+
+// getBinaryPath returns the correct binary path for a panel application
+func (orch *TmuxOrchestrator) getBinaryPath(appName string) (string, error) {
+	// Get the directory where the current executable is located
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Get the cmd directory (parent of opencode-tmux)
+	execDir := filepath.Dir(execPath)
+	cmdDir := filepath.Dir(execDir)
+
+	// Map app names to their binary paths
+	var binaryName string
+	switch appName {
+	case "opencode-sessions":
+		binaryName = filepath.Join(cmdDir, "opencode-sessions", "dist", "sessions-pane")
+	case "opencode-messages":
+		binaryName = filepath.Join(cmdDir, "opencode-messages", "dist", "messages-pane")
+	case "opencode-input":
+		binaryName = filepath.Join(cmdDir, "opencode-input", "dist", "input-pane")
+	default:
+		return "", fmt.Errorf("unknown app name: %s", appName)
+	}
+
+	// Check if binary exists
+	if _, err := os.Stat(binaryName); os.IsNotExist(err) {
+		return "", fmt.Errorf("binary not found: %s", binaryName)
+	}
+
+	log.Printf("[DEBUG] Resolved binary path for %s: %s", appName, binaryName)
+	return binaryName, nil
+}
+
+// verifyPanelsRunning checks if panel applications are running
+func (orch *TmuxOrchestrator) verifyPanelsRunning() bool {
+	sessionTarget := orch.sessionName + ":0"
+
+	panelsRunning := 0
+	totalPanels := 3
+
+	for i := 0; i < totalPanels; i++ {
+		paneTarget := fmt.Sprintf("%s.%d", sessionTarget, i)
+
+		// Check if pane exists and is active
+		cmd := exec.Command(orch.tmuxCommand, "list-panes", "-t", paneTarget, "-F", "#{pane_pid}")
+		if output, err := cmd.Output(); err == nil && len(output) > 0 {
+			panelsRunning++
+			log.Printf("[DEBUG] Pane %d is active (PID: %s)", i, string(output)[:len(output)-1])
+		} else {
+			log.Printf("[DEBUG] Pane %d is not active or has no process", i)
+		}
+	}
+
+	log.Printf("Panel verification: %d/%d panels are running", panelsRunning, totalPanels)
+	return panelsRunning > 0
 }
 
 // killTmuxSession kills the tmux session if it exists
@@ -394,9 +507,13 @@ func (orch *TmuxOrchestrator) printStatus() {
 
 func main() {
 	// Parse command line arguments
+	var serverOnly bool
+	flag.BoolVar(&serverOnly, "server-only", false, "Only start IPC server without panels")
+	flag.Parse()
+
 	sessionName := "opencode"
-	if len(os.Args) > 1 {
-		sessionName = os.Args[1]
+	if flag.NArg() > 0 {
+		sessionName = flag.Arg(0)
 	}
 
 	// Get configuration from environment
@@ -424,7 +541,11 @@ func main() {
 	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
 
 	// Create orchestrator
-	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, httpClient)
+	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, httpClient, serverOnly)
+
+	if serverOnly {
+		log.Printf("Starting in server-only mode - IPC server only, no panels")
+	}
 
 	// Initialize
 	if err := orchestrator.Initialize(); err != nil {
@@ -442,14 +563,17 @@ func main() {
 	// Print status
 	orchestrator.printStatus()
 
-	// Attach to session if stdin is a terminal
-	if isTerminal() {
+	// Attach to session if stdin is a terminal and not in server-only mode
+	if isTerminal() && !serverOnly {
 		log.Printf("Attaching to tmux session...")
 		if err := orchestrator.attachToSession(); err != nil {
 			log.Printf("Failed to attach to session: %v", err)
 		}
 	} else {
-		// Wait for shutdown signal
+		// Wait for shutdown signal (for server-only mode or non-terminal)
+		if serverOnly {
+			log.Printf("Server-only mode: waiting for shutdown signal...")
+		}
 		orchestrator.waitForShutdown()
 	}
 
