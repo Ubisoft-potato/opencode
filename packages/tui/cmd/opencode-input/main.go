@@ -531,9 +531,72 @@ func (p InputPanel) sendMessage() tea.Cmd {
 			return ErrorMsg{Error: err}
 		}
 
-		// Send to API
-		// This would normally send to the OpenCode API
-		// For now, we'll just simulate success
+		// Send to OpenCode API
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		response, err := p.client.Session.Prompt(ctx, p.currentSessionID, opencode.SessionPromptParams{
+			Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
+				opencode.TextPartInputParam{
+					Text: opencode.F(message),
+					Type: opencode.F(opencode.TextPartInputTypeText),
+				},
+			}),
+		})
+
+		if err != nil {
+			log.Printf("[INPUT] Failed to send message to OpenCode API: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to send message to OpenCode: %w", err)}
+		}
+
+		log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
+
+		// Create assistant message from response
+		if response != nil {
+			// Check for errors in the response
+			if response.Info.Error.Name != "" {
+				log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
+				return ErrorMsg{Error: fmt.Errorf("assistant error: %s", response.Info.Error.Name)}
+			}
+
+			assistantMessage := state.MessageInfo{
+				ID:        response.Info.ID, // Use the actual message ID from response
+				SessionID: p.currentSessionID,
+				Type:      "assistant",
+				Content:   "", // Will be populated from response parts
+				Timestamp: time.Now(),
+				Status:    "completed",
+			}
+
+			// Extract content from response parts
+			if len(response.Parts) > 0 {
+				var contentParts []string
+				for _, part := range response.Parts {
+					// Filter for text parts and skip synthetic parts
+					if part.Type == opencode.PartTypeText && !part.Synthetic {
+						if strings.TrimSpace(part.Text) != "" {
+							contentParts = append(contentParts, part.Text)
+						}
+					}
+				}
+				assistantMessage.Content = strings.Join(contentParts, "\n")
+			}
+
+			// Send assistant message state update
+			assistantUpdate := state.StateUpdate{
+				Type:            state.MessageAdded,
+				ExpectedVersion: p.ipcClient.GetCurrentVersion(),
+				Payload:         state.MessageAddPayload{Message: assistantMessage},
+				SourcePanel:     "input-panel",
+				Timestamp:       time.Now(),
+			}
+
+			if err := p.ipcClient.SendStateUpdate(assistantUpdate); err != nil {
+				log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
+			} else {
+				log.Printf("[INPUT] Successfully added assistant response to state")
+			}
+		}
 
 		return MessageSentMsg{Message: messageInfo}
 	}
@@ -691,14 +754,30 @@ func (p InputPanel) createNewSession() tea.Cmd {
 		// Generate a default title with timestamp
 		title := fmt.Sprintf("New Session %s", time.Now().Format("15:04:05"))
 
-		// Create state update to add a new session
+		// Create session on OpenCode server first
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		session, err := p.client.Session.New(ctx, opencode.SessionNewParams{
+			Directory: opencode.F("/Users/hhx/work/upwork/opencode"), // Use project root directory
+			Title:     opencode.F(title),
+		})
+
+		if err != nil {
+			log.Printf("[INPUT] Failed to create session on OpenCode server: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to create session: %w", err)}
+		}
+
+		log.Printf("[INPUT] Successfully created session on OpenCode server: %s", session.ID)
+
+		// Now create local state update with the server-assigned session ID
 		update := state.StateUpdate{
 			Type:            state.SessionAdded,
 			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
 			Payload: state.SessionAddPayload{
 				Session: types.SessionInfo{
-					ID:           fmt.Sprintf("session_%d", time.Now().UnixNano()),
-					Title:        title,
+					ID:           session.ID, // Use server-assigned ID
+					Title:        session.Title,
 					CreatedAt:    time.Now(),
 					UpdatedAt:    time.Now(),
 					MessageCount: 0,
@@ -711,10 +790,11 @@ func (p InputPanel) createNewSession() tea.Cmd {
 
 		// Send the update via IPC
 		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+			log.Printf("[INPUT] Failed to send session state update: %v", err)
 			return ErrorMsg{Error: err}
 		}
 
-		return InfoMsg{Message: fmt.Sprintf("Created new session: %s", title)}
+		return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
 	}
 }
 
@@ -738,6 +818,27 @@ func (p InputPanel) switchToSession(sessionID string) tea.Cmd {
 
 func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
+		// Delete session on OpenCode server first
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		result, err := p.client.Session.Delete(ctx, sessionID, opencode.SessionDeleteParams{
+			Directory: opencode.F("/Users/hhx/work/upwork/opencode"), // Use project root directory
+		})
+
+		if err != nil {
+			log.Printf("[INPUT] Failed to delete session on OpenCode server: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to delete session: %w", err)}
+		}
+
+		if result == nil || !*result {
+			log.Printf("[INPUT] Session deletion returned false or nil result")
+			return ErrorMsg{Error: fmt.Errorf("session deletion failed on server")}
+		}
+
+		log.Printf("[INPUT] Successfully deleted session on OpenCode server: %s", sessionID)
+
+		// Now update local state
 		update := state.StateUpdate{
 			Type:            state.SessionDeleted,
 			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
@@ -747,6 +848,7 @@ func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
 		}
 
 		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+			log.Printf("[INPUT] Failed to send session delete state update: %v", err)
 			return ErrorMsg{Error: err}
 		}
 

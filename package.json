@@ -5,7 +5,9 @@
   "type": "module",
   "packageManager": "bun@1.2.21",
   "scripts": {
-    "dev": "bun run packages/opencode/src/index.ts",
+    "dev": "concurrently \"bun run packages/opencode/src/index.ts serve\" \"cd packages/tui/cmd/opencode-tmux && OPENCODE_SERVER=http://127.0.0.1:62435 OPENCODE_SOCKET=/Users/hhx/.opencode/ipc.sock ./opencode-tmux\"",
+    "dev:server-only": "bun run packages/opencode/src/index.ts serve",
+    "dev:tui-only": "cd packages/tui/cmd/opencode-tmux && OPENCODE_SERVER=http://127.0.0.1:62435 OPENCODE_SOCKET=/Users/hhx/.opencode/ipc.sock ./opencode-tmux",
     "typecheck": "bun turbo typecheck",
     "prepare": "husky"
   },
@@ -32,6 +34,7 @@
     }
   },
   "devDependencies": {
+    "concurrently": "9.2.1",
     "husky": "9.1.7",
     "prettier": "3.6.2",
     "sst": "3.17.13",

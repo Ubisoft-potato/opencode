@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,10 +36,12 @@ type TmuxOrchestrator struct {
 	tmuxCommand    string
 	isRunning      bool
 	serverOnly     bool
+	sseClient      *http.Client
+	serverURL      string
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
-func NewTmuxOrchestrator(sessionName, socketPath, statePath string, httpClient *opencode.Client, serverOnly bool) *TmuxOrchestrator {
+func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool) *TmuxOrchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &TmuxOrchestrator{
@@ -48,6 +53,8 @@ func NewTmuxOrchestrator(sessionName, socketPath, statePath string, httpClient *
 		cancel:      cancel,
 		tmuxCommand: "tmux",
 		serverOnly:  serverOnly,
+		sseClient:   &http.Client{Timeout: 0}, // No timeout for SSE connections
+		serverURL:   serverURL,
 	}
 }
 
@@ -68,6 +75,18 @@ func (orch *TmuxOrchestrator) Initialize() error {
 	// Start IPC server
 	if err := orch.startIPCServer(); err != nil {
 		return fmt.Errorf("failed to start IPC server: %w", err)
+	}
+
+	// Start SSE client for real-time updates
+	if err := orch.startSSEClient(); err != nil {
+		log.Printf("Warning: Failed to start SSE client: %v", err)
+		// Don't fail initialization if SSE fails - it's not critical
+	}
+
+	// Load existing sessions from OpenCode server
+	if err := orch.loadSessionsFromServer(); err != nil {
+		log.Printf("Warning: Failed to load sessions from server: %v", err)
+		// Don't fail initialization if session loading fails - it's not critical
 	}
 
 	log.Printf("Tmux orchestrator initialized successfully")
@@ -549,7 +568,7 @@ func main() {
 	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
 
 	// Create orchestrator
-	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, httpClient, serverOnly)
+	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly)
 
 	if serverOnly {
 		log.Printf("Starting in server-only mode - IPC server only, no panels")
@@ -589,6 +608,133 @@ func main() {
 	if err := orchestrator.Stop(); err != nil {
 		log.Printf("Error during shutdown: %v", err)
 	}
+}
+
+// startSSEClient starts the Server-Sent Events client for real-time updates
+func (orch *TmuxOrchestrator) startSSEClient() error {
+	eventURL := orch.serverURL + "/event"
+	log.Printf("Starting SSE client, connecting to: %s", eventURL)
+
+	go func() {
+		for {
+			select {
+			case <-orch.ctx.Done():
+				log.Printf("SSE client stopping due to context cancellation")
+				return
+			default:
+				if err := orch.connectSSE(eventURL); err != nil {
+					log.Printf("SSE connection error: %v, retrying in 5 seconds...", err)
+					time.Sleep(5 * time.Second)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+// connectSSE establishes an SSE connection and processes events
+func (orch *TmuxOrchestrator) connectSSE(eventURL string) error {
+	req, err := http.NewRequestWithContext(orch.ctx, "GET", eventURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create SSE request: %w", err)
+	}
+
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := orch.sseClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to SSE endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("SSE endpoint returned status %d", resp.StatusCode)
+	}
+
+	log.Printf("SSE client connected successfully")
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			orch.handleSSEEvent(data)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("SSE scanner error: %w", err)
+	}
+
+	return nil
+}
+
+// handleSSEEvent processes incoming SSE events
+func (orch *TmuxOrchestrator) handleSSEEvent(data string) {
+	log.Printf("[SSE] Received event: %s", data)
+
+	// For now, just log the events
+	// Later we can parse and route specific events to the IPC state manager
+	// For example:
+	// - Session updates
+	// - Message updates
+	// - Assistant responses
+	// - System notifications
+}
+
+// loadSessionsFromServer loads existing sessions from OpenCode server into local state
+func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
+	log.Printf("Loading existing sessions from OpenCode server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Get sessions from server
+	sessions, err := orch.httpClient.Session.List(ctx, opencode.SessionListParams{
+		Directory: opencode.F("/Users/hhx/work/upwork/opencode"), // Filter by project root directory
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to list sessions from server: %w", err)
+	}
+
+	if sessions == nil || len(*sessions) == 0 {
+		log.Printf("No existing sessions found on server")
+		return nil
+	}
+
+	log.Printf("Found %d existing sessions on server", len(*sessions))
+
+	// Convert server sessions to local session format and add to state
+	for _, serverSession := range *sessions {
+		sessionInfo := state.SessionInfo{
+			ID:           serverSession.ID,
+			Title:        serverSession.Title,
+			CreatedAt:    time.Unix(int64(serverSession.Time.Created), 0),
+			UpdatedAt:    time.Unix(int64(serverSession.Time.Updated), 0),
+			MessageCount: 0, // We'd need to call message endpoint to get count
+			IsActive:     true,
+		}
+
+		// Add the session through the sync manager
+		if err := orch.syncManager.AddSession(sessionInfo, "server-sync"); err != nil {
+			log.Printf("Warning: Failed to add session %s to local state: %v", serverSession.ID, err)
+			continue
+		}
+
+		log.Printf("Loaded session: %s (%s)", sessionInfo.Title, sessionInfo.ID)
+	}
+
+	log.Printf("Successfully loaded %d sessions from server", len(*sessions))
+	return nil
 }
 
 // isTerminal checks if stdin is a terminal
