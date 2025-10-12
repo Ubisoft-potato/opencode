@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -258,3 +259,91 @@ const (
 	EventPanelConnected  StateEventType = "panel_connected"
 	EventPanelDisconnected StateEventType = "panel_disconnected"
 )
+
+// Session management methods
+
+// AddSession adds a new session to the state (thread-safe)
+func (s *SharedApplicationState) AddSession(session SessionInfo) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	s.Sessions = append(s.Sessions, session)
+	s.Version.Version++
+	s.Version.Timestamp = time.Now()
+	s.LastUpdate = time.Now()
+	s.UpdateCount++
+}
+
+// RemoveSession removes a session by ID (thread-safe)
+func (s *SharedApplicationState) RemoveSession(sessionID string) bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for i, session := range s.Sessions {
+		if session.ID == sessionID {
+			s.Sessions = append(s.Sessions[:i], s.Sessions[i+1:]...)
+
+			// If this was the current session, clear it
+			if s.CurrentSessionID == sessionID {
+				s.CurrentSessionID = ""
+			}
+
+			s.Version.Version++
+			s.Version.Timestamp = time.Now()
+			s.LastUpdate = time.Now()
+			s.UpdateCount++
+			return true
+		}
+	}
+	return false
+}
+
+// SetCurrentSession sets the current active session (thread-safe)
+func (s *SharedApplicationState) SetCurrentSession(sessionID string) bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Validate that the session exists
+	for _, session := range s.Sessions {
+		if session.ID == sessionID {
+			s.CurrentSessionID = sessionID
+			s.Version.Version++
+			s.Version.Timestamp = time.Now()
+			s.LastUpdate = time.Now()
+			s.UpdateCount++
+			return true
+		}
+	}
+	return false
+}
+
+// GetSessionByID returns a session by ID (thread-safe)
+func (s *SharedApplicationState) GetSessionByID(sessionID string) (SessionInfo, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	for _, session := range s.Sessions {
+		if session.ID == sessionID {
+			return session, true
+		}
+	}
+	return SessionInfo{}, false
+}
+
+// CreateNewSession creates a new session with a generated ID
+func (s *SharedApplicationState) CreateNewSession(title string) SessionInfo {
+	now := time.Now()
+	session := SessionInfo{
+		ID:           fmt.Sprintf("session_%d", now.UnixNano()),
+		Title:        title,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		MessageCount: 0,
+		IsActive:     false,
+	}
+
+	s.AddSession(session)
+	s.SetCurrentSession(session.ID)
+
+	return session
+}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -37,6 +38,8 @@ type SocketClient struct {
 	lastPingTime      time.Time
 	pingInterval      time.Duration
 	stateResponseChan chan IPCMessage // Channel for state responses
+	currentVersion    int64           // Track current state version
+	versionMux        sync.RWMutex    // Mutex for version access
 }
 
 // EventHandler defines the signature for event handling functions
@@ -317,6 +320,8 @@ func (client *SocketClient) RequestState() (*types.SharedApplicationState, error
 		}
 
 		log.Printf("[CLIENT] State decoded successfully, version: %d", stateData.Version.Version)
+		// Update current version
+		client.setCurrentVersion(stateData.Version.Version)
 		log.Printf("[CLIENT] Successfully received state data")
 		return &stateData, nil
 
@@ -400,6 +405,8 @@ func (client *SocketClient) processMessage(message IPCMessage) {
 		client.handleError(message)
 	case "state_update_response":
 		client.handleStateUpdateResponse(message)
+	case "state_update_error":
+		client.handleStateUpdateError(message)
 	default:
 		log.Printf("Unknown message type: %s", message.Type)
 	}
@@ -412,6 +419,9 @@ func (client *SocketClient) handleStateEvent(message IPCMessage) {
 		log.Printf("Failed to decode state event: %v", err)
 		return
 	}
+
+	// Update current version from event
+	client.setCurrentVersion(event.Version)
 
 	// Call registered event handlers
 	client.handlerMux.RLock()
@@ -453,9 +463,31 @@ func (client *SocketClient) handleError(message IPCMessage) {
 // handleStateUpdateResponse processes state update responses
 func (client *SocketClient) handleStateUpdateResponse(message IPCMessage) {
 	if responseData, ok := message.Data.(map[string]interface{}); ok {
-		if success, ok := responseData["success"].(bool); ok && !success {
-			if errorMsg, ok := responseData["error"].(string); ok {
-				log.Printf("State update failed: %s", errorMsg)
+		if success, ok := responseData["success"].(bool); ok && success {
+			// 成功时更新版本号
+			if version, ok := responseData["version"].(float64); ok {
+				client.setCurrentVersion(int64(version))
+			}
+		} else if errorMsg, ok := responseData["error"].(string); ok {
+			log.Printf("State update failed: %s", errorMsg)
+		}
+	}
+}
+
+// handleStateUpdateError processes state update error messages
+func (client *SocketClient) handleStateUpdateError(message IPCMessage) {
+	if errorData, ok := message.Data.(map[string]interface{}); ok {
+		if errorMsg, ok := errorData["error"].(string); ok {
+			log.Printf("State update error: %s", errorMsg)
+			// If it's a version conflict, refresh our state version
+			if errorMsg == "version conflict: expected 0, current 1" ||
+			   strings.Contains(errorMsg, "version conflict") {
+				log.Printf("Version conflict detected, requesting fresh state...")
+				go func() {
+					if state, err := client.RequestState(); err == nil {
+						log.Printf("State refreshed with version: %d", state.Version.Version)
+					}
+				}()
 			}
 		}
 	}
@@ -575,4 +607,18 @@ func isConnectionError(err error) bool {
 	}
 
 	return false
+}
+
+// GetCurrentVersion returns the current state version (thread-safe)
+func (client *SocketClient) GetCurrentVersion() int64 {
+	client.versionMux.RLock()
+	defer client.versionMux.RUnlock()
+	return client.currentVersion
+}
+
+// setCurrentVersion updates the current state version (thread-safe)
+func (client *SocketClient) setCurrentVersion(version int64) {
+	client.versionMux.Lock()
+	defer client.versionMux.Unlock()
+	client.currentVersion = version
 }

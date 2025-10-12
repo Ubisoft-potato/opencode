@@ -466,6 +466,10 @@ func (p InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 		if len(args) > 0 {
 			return p, p.switchToSession(args[0])
 		}
+	case "/delete":
+		if len(args) > 0 {
+			return p, p.deleteSession(args[0])
+		}
 	case "/theme":
 		if len(args) > 0 {
 			return p, p.changeTheme(args[0])
@@ -624,7 +628,8 @@ func (p *InputPanel) handleInputEvent(event state.StateEvent) (InputPanel, tea.C
 func (p InputPanel) syncInputState() tea.Cmd {
 	return func() tea.Msg {
 		update := state.StateUpdate{
-			Type: state.InputUpdated,
+			Type:            state.InputUpdated,
+			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
 			Payload: state.InputUpdatePayload{
 				Buffer:         p.buffer,
 				CursorPosition: p.cursorPosition,
@@ -647,7 +652,8 @@ func (p InputPanel) syncInputState() tea.Cmd {
 func (p InputPanel) syncCursorPosition() tea.Cmd {
 	return func() tea.Msg {
 		update := state.StateUpdate{
-			Type: state.CursorMoved,
+			Type:            state.CursorMoved,
+			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
 			Payload: state.CursorMovePayload{
 				Position:       p.cursorPosition,
 				SelectionStart: p.selectionStart,
@@ -669,7 +675,7 @@ func (p InputPanel) syncCursorPosition() tea.Cmd {
 
 func (p InputPanel) showHelpMessage() tea.Cmd {
 	return func() tea.Msg {
-		return InfoMsg{Message: "Commands: /help /clear /new /session <id> /theme <name> /model <provider> <model> /agent <name>"}
+		return InfoMsg{Message: "Commands: /help /clear /new /session <id> /delete <id> /theme <name> /model <provider> <model> /agent <name>"}
 	}
 }
 
@@ -682,18 +688,44 @@ func (p InputPanel) clearMessages() tea.Cmd {
 
 func (p InputPanel) createNewSession() tea.Cmd {
 	return func() tea.Msg {
-		// This would trigger session creation
-		return InfoMsg{Message: "Creating new session..."}
+		// Generate a default title with timestamp
+		title := fmt.Sprintf("New Session %s", time.Now().Format("15:04:05"))
+
+		// Create state update to add a new session
+		update := state.StateUpdate{
+			Type:            state.SessionAdded,
+			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
+			Payload: state.SessionAddPayload{
+				Session: types.SessionInfo{
+					ID:           fmt.Sprintf("session_%d", time.Now().UnixNano()),
+					Title:        title,
+					CreatedAt:    time.Now(),
+					UpdatedAt:    time.Now(),
+					MessageCount: 0,
+					IsActive:     true,
+				},
+			},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+		}
+
+		// Send the update via IPC
+		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+			return ErrorMsg{Error: err}
+		}
+
+		return InfoMsg{Message: fmt.Sprintf("Created new session: %s", title)}
 	}
 }
 
 func (p InputPanel) switchToSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		update := state.StateUpdate{
-			Type:        state.SessionChanged,
-			Payload:     state.SessionChangePayload{SessionID: sessionID},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            state.SessionChanged,
+			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
+			Payload:         state.SessionChangePayload{SessionID: sessionID},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
 		}
 
 		if err := p.ipcClient.SendStateUpdate(update); err != nil {
@@ -701,6 +733,24 @@ func (p InputPanel) switchToSession(sessionID string) tea.Cmd {
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
+	}
+}
+
+func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		update := state.StateUpdate{
+			Type:            state.SessionDeleted,
+			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
+			Payload:         state.SessionDeletePayload{SessionID: sessionID},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+		}
+
+		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+			return ErrorMsg{Error: err}
+		}
+
+		return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
 	}
 }
 

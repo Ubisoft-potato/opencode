@@ -506,6 +506,14 @@ func (orch *TmuxOrchestrator) printStatus() {
 }
 
 func main() {
+	// 设置日志输出到文件
+	logFile, err := os.OpenFile("/Users/hhx/.opencode/tmux.log",
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err == nil {
+		log.SetOutput(logFile)
+		defer logFile.Close()
+	}
+
 	// Parse command line arguments
 	var serverOnly bool
 	flag.BoolVar(&serverOnly, "server-only", false, "Only start IPC server without panels")
