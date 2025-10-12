@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sst/opencode/internal/types"
@@ -39,30 +42,56 @@ type SocketClient struct {
 // EventHandler defines the signature for event handling functions
 type EventHandler func(event types.StateEvent) error
 
-// readJSONMessage reads a complete JSON message from the connection using proven method
-func (client *SocketClient) readJSONMessage() (*IPCMessage, error) {
-	// Use buffered reader to read all available data
-	reader := bufio.NewReader(client.conn)
+// readResult stores the result of a read operation
+type readResult struct {
+	data *IPCMessage
+	err  error
+}
 
+// readJSONMessage reads a JSON message from the connection using context-controlled timeout
+func (client *SocketClient) readJSONMessage() (*IPCMessage, error) {
+	// Use context to control read timeout instead of connection deadline
+	ctx, cancel := context.WithTimeout(client.ctx, 30*time.Second)
+	defer cancel()
+
+	// Channel to receive read result
+	resultChan := make(chan readResult, 1)
+
+	// Start blocking read in goroutine
+	go func() {
+		data, err := client.readDataBlocking()
+		resultChan <- readResult{data: data, err: err}
+	}()
+
+	// Wait for either result or context timeout
+	select {
+	case result := <-resultChan:
+		return result.data, result.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("read cancelled: %w", ctx.Err())
+	}
+}
+
+// readDataBlocking performs blocking read without connection-level timeouts
+func (client *SocketClient) readDataBlocking() (*IPCMessage, error) {
+	reader := bufio.NewReader(client.conn)
 	var allData []byte
 	chunkCount := 0
 
-	// Set initial timeout - use the same timeout as the working data-dump test
-	client.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-
+	// No connection deadline - rely on context cancellation
 	for {
 		// Try to read a chunk
 		chunk := make([]byte, 1024)
 		n, err := reader.Read(chunk)
 
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				log.Printf("[CLIENT] Read timeout after %d chunks", chunkCount)
-				break
-			} else {
-				log.Printf("[CLIENT] Read error: %v", err)
+			if err == io.EOF && len(allData) > 0 {
+				// EOF with data means connection closed after sending data
+				log.Printf("[CLIENT] EOF after receiving %d bytes", len(allData))
 				break
 			}
+			log.Printf("[CLIENT] Read error: %v", err)
+			return nil, err
 		}
 
 		if n > 0 {
@@ -71,20 +100,14 @@ func (client *SocketClient) readJSONMessage() (*IPCMessage, error) {
 			log.Printf("[CLIENT] Chunk %d: %d bytes", chunkCount, n)
 			log.Printf("[CLIENT] Content: %s", string(chunk[:n]))
 
-			// Check if we have a complete JSON message by trying to parse
+			// Check if we have a complete JSON message
 			var testMessage IPCMessage
 			if err := json.Unmarshal(allData, &testMessage); err == nil {
 				log.Printf("[CLIENT] Complete JSON detected after %d chunks, stopping read", chunkCount)
 				break
 			}
-
-			// Reset timeout for next chunk - match the working test
-			client.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		}
 	}
-
-	// Clear deadline
-	client.conn.SetReadDeadline(time.Time{})
 
 	if len(allData) == 0 {
 		return nil, fmt.Errorf("no data received")
@@ -93,7 +116,7 @@ func (client *SocketClient) readJSONMessage() (*IPCMessage, error) {
 	log.Printf("[CLIENT] Total data received: %d bytes in %d chunks", len(allData), chunkCount)
 	log.Printf("[CLIENT] Complete data: %s", string(allData))
 
-	// Try to parse as JSON
+	// Parse as JSON
 	var message IPCMessage
 	if err := json.Unmarshal(allData, &message); err != nil {
 		return nil, fmt.Errorf("JSON parsing failed: %w", err)
@@ -116,7 +139,7 @@ func NewSocketClient(socketPath, panelID, panelType string) *SocketClient {
 		cancel:            cancel,
 		reconnectDelay:    5 * time.Second,
 		maxReconnects:     10,
-		pingInterval:      30 * time.Second,
+		pingInterval:      10 * time.Second,
 		stateResponseChan: make(chan IPCMessage, 5), // Buffered channel for state responses
 	}
 }
@@ -335,13 +358,20 @@ func (client *SocketClient) handleMessages() {
 			// Use manual reading approach to avoid buffering conflicts
 			messagePtr, err := client.readJSONMessage()
 			if err != nil {
-				// Check if it's a timeout
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Distinguish between timeout/cancellation and real connection errors
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					// Normal timeout or cancellation, continue waiting
+					continue
+				} else if isConnectionError(err) {
+					// Real connection error, trigger reconnection
+					log.Printf("Connection error: %v", err)
+					client.handleConnectionError(err)
+					return
+				} else {
+					// Other errors, log but continue
+					log.Printf("Read error (continuing): %v", err)
 					continue
 				}
-				log.Printf("Error reading message: %v", err)
-				client.handleConnectionError(err)
-				return
 			}
 			message := *messagePtr
 
@@ -524,4 +554,25 @@ type ConnectionInfo struct {
 	IsConnected    bool      `json:"is_connected"`
 	ReconnectCount int       `json:"reconnect_count"`
 	LastPingTime   time.Time `json:"last_ping_time"`
+}
+
+// isConnectionError determines if an error is a real connection error vs timeout
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for real connection errors
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+
+	// Check for network errors that are not timeouts
+	if netErr, ok := err.(net.Error); ok {
+		return !netErr.Timeout() // Non-timeout network errors are connection errors
+	}
+
+	return false
 }

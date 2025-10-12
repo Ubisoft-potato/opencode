@@ -464,6 +464,22 @@ type SessionsRefreshedMsg struct {
 }
 
 func main() {
+	// Configure logging to file
+	logFileHomeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Failed to get home directory: %v", err)
+	}
+	logDir := filepath.Join(logFileHomeDir, ".opencode")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Fatalf("Failed to create log directory: %v", err)
+	}
+	logPath := filepath.Join(logDir, "sessions.log")
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	log.SetOutput(logFile)
+
 	// Get environment variables
 	serverURL := os.Getenv("OPENCODE_SERVER")
 	if serverURL == "" {
