@@ -72,6 +72,12 @@ func (orch *TmuxOrchestrator) Initialize() error {
 		return fmt.Errorf("failed to initialize state management: %w", err)
 	}
 
+	// Load existing sessions from OpenCode server
+	if err := orch.loadSessionsFromServer(); err != nil {
+		log.Printf("Warning: Failed to load sessions from server: %v", err)
+		// Don't fail initialization if session loading fails - it's not critical
+	}
+
 	// Start IPC server
 	if err := orch.startIPCServer(); err != nil {
 		return fmt.Errorf("failed to start IPC server: %w", err)
@@ -81,12 +87,6 @@ func (orch *TmuxOrchestrator) Initialize() error {
 	if err := orch.startSSEClient(); err != nil {
 		log.Printf("Warning: Failed to start SSE client: %v", err)
 		// Don't fail initialization if SSE fails - it's not critical
-	}
-
-	// Load existing sessions from OpenCode server
-	if err := orch.loadSessionsFromServer(); err != nil {
-		log.Printf("Warning: Failed to load sessions from server: %v", err)
-		// Don't fail initialization if session loading fails - it's not critical
 	}
 
 	log.Printf("Tmux orchestrator initialized successfully")
@@ -530,6 +530,7 @@ func main() {
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err == nil {
 		log.SetOutput(logFile)
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
 		defer logFile.Close()
 	}
 
@@ -718,8 +719,8 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 		sessionInfo := state.SessionInfo{
 			ID:           serverSession.ID,
 			Title:        serverSession.Title,
-			CreatedAt:    time.Unix(int64(serverSession.Time.Created), 0),
-			UpdatedAt:    time.Unix(int64(serverSession.Time.Updated), 0),
+			CreatedAt:    parseServerTime(serverSession.Time.Created),
+			UpdatedAt:    parseServerTime(serverSession.Time.Updated),
 			MessageCount: 0, // We'd need to call message endpoint to get count
 			IsActive:     true,
 		}
@@ -735,6 +736,16 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 
 	log.Printf("Successfully loaded %d sessions from server", len(*sessions))
 	return nil
+}
+
+// parseServerTime safely converts a server timestamp to a time.Time object.
+// It returns a zero-value time if the timestamp is not positive.
+func parseServerTime(timestamp float64) time.Time {
+	if timestamp <= 0 {
+		return time.Time{}
+	}
+	// The timestamp from the server is in milliseconds, so use UnixMilli.
+	return time.UnixMilli(int64(timestamp))
 }
 
 // isTerminal checks if stdin is a terminal

@@ -479,6 +479,7 @@ func main() {
 		log.Fatalf("Failed to open log file: %v", err)
 	}
 	log.SetOutput(logFile)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	// Get environment variables
 	serverURL := os.Getenv("OPENCODE_SERVER")

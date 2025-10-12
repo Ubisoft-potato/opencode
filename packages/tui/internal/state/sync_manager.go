@@ -437,13 +437,27 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 			update.ExpectedVersion, manager.state.Version.Version)
 	}
 
-	// Apply the update (implementation would need to be added based on update type)
-	// For now, just update version and metadata
-	manager.state.Version.Version++
-	manager.state.Version.Timestamp = time.Now()
-	manager.state.Version.Source = update.SourcePanel
-	manager.state.LastUpdate = time.Now()
-	manager.state.UpdateCount++
+	// Apply the update based on its type
+	switch update.Type {
+	case types.SessionAdded:
+		if payload, ok := update.Payload.(SessionAddPayload); ok {
+			// Use the existing thread-safe method on SharedApplicationState
+			manager.state.AddSession(payload.Session)
+			// Adjust metadata that AddSession doesn't cover
+			manager.state.Version.Source = update.SourcePanel
+		} else {
+			return fmt.Errorf("invalid payload for SessionAdded: %T", update.Payload)
+		}
+
+	default:
+		// For other update types, for now, just update version and metadata
+		// This is the old, incomplete behavior and should be implemented fully
+		manager.state.Version.Version++
+		manager.state.Version.Timestamp = time.Now()
+		manager.state.Version.Source = update.SourcePanel
+		manager.state.LastUpdate = time.Now()
+		manager.state.UpdateCount++
+	}
 
 	return nil
 }

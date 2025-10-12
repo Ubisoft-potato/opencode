@@ -409,6 +409,20 @@ func (server *SocketServer) handleStateRequest(clientConn *ClientConnection, mes
 		log.Printf("[SERVER] JSON length: %d bytes", len(jsonData))
 	} else {
 		log.Printf("[SERVER] ERROR: Failed to marshal response for debugging: %v", err)
+
+		// --- BEGIN STATE DUMP (Serialization Failed) ---
+		log.Printf("[SERVER] --- BEGIN STATE DUMP (Serialization Failed) ---")
+		log.Printf("[SERVER] State Version: %+v", clonedState.Version)
+		log.Printf("[SERVER] CurrentSessionID: %s", clonedState.CurrentSessionID)
+		log.Printf("[SERVER] Theme: %s", clonedState.Theme)
+		log.Printf("[SERVER] UpdateCount: %d", clonedState.UpdateCount)
+		log.Printf("[SERVER] Session Count: %d", len(clonedState.Sessions))
+		for i, s := range clonedState.Sessions {
+			log.Printf("[SERVER]   Session[%d]: ID=%s, Title=%s, CreatedAt=%v, UpdatedAt=%v", i, s.ID, s.Title, s.CreatedAt, s.UpdatedAt)
+		}
+		log.Printf("[SERVER] --- END STATE DUMP ---")
+		// --- END NEW DEBUG LOGIC ---
+
 		server.sendError(clientConn, "failed to serialize response")
 		return
 	}
