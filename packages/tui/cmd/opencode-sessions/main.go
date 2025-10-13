@@ -175,13 +175,12 @@ func (p SessionsPanel) selectCurrentSession() tea.Cmd {
 				Timestamp:   time.Now(),
 			}
 
-			log.Printf("[SESSIONS] Sending SessionChanged event for session: %s", session.ID)
-			if err := p.ipcClient.SendStateUpdate(update); err != nil {
+			if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 				log.Printf("[SESSIONS] Failed to send SessionChanged event: %v", err)
 				return ErrorMsg{Error: err}
 			}
 
-			log.Printf("[SESSIONS] Successfully sent SessionChanged event")
+			log.Printf("[SESSIONS] Successfully sent and acknowledged SessionChanged event")
 			return SessionSelectedMsg{SessionID: session.ID}
 		}
 	}
@@ -208,16 +207,15 @@ func (p SessionsPanel) createNewSession() tea.Cmd {
 			IsActive:     true,
 		}
 
-		// Send update
-		update := state.StateUpdate{
-			Type:        state.SessionAdded,
-			Payload:     state.SessionAddPayload{Session: sessionInfo},
-			SourcePanel: "sessions-panel",
-			Timestamp:   time.Now(),
-		}
-
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
-			return ErrorMsg{Error: err}
+		        // Send update
+		        update := state.StateUpdate{
+		            Type:        state.SessionAdded,
+		            Payload:     state.SessionAddPayload{Session: sessionInfo},
+		            SourcePanel: "sessions-panel",
+		            Timestamp:   time.Now(),
+		        }
+		
+		        if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {			return ErrorMsg{Error: err}
 		}
 
 		return SessionCreatedMsg{Session: sessionInfo}
@@ -242,7 +240,7 @@ func (p SessionsPanel) deleteCurrentSession() tea.Cmd {
 				Timestamp:   time.Now(),
 			}
 
-			if err := p.ipcClient.SendStateUpdate(update); err != nil {
+			if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 				return ErrorMsg{Error: err}
 			}
 

@@ -315,12 +315,68 @@ func (p *MessagesPanel) handleMessageDeleted(event state.StateEvent) error {
 
 func (p *MessagesPanel) handleSessionChanged(event state.StateEvent) error {
 	if payload, ok := event.Data.(state.SessionChangePayload); ok {
+		log.Printf("[MESSAGES] Session changed to: %s", payload.SessionID)
 		p.currentSessionID = payload.SessionID
-		// Filter messages for new session
-		// In a real implementation, you'd load messages for the new session
-		p.messages = make([]types.MessageInfo, 0)
 		p.scrollOffset = 0
-		log.Printf("Session changed: %s", payload.SessionID)
+
+		// Fetch messages for the new session
+		messages, err := p.client.Session.Messages(p.ctx, p.currentSessionID, opencode.SessionMessagesParams{})
+		if err != nil {
+			log.Printf("[MESSAGES] Error fetching messages for session %s: %v", p.currentSessionID, err)
+			p.messages = make([]types.MessageInfo, 0) // Clear messages on error
+			return nil
+		}
+
+		// Convert to state format
+		messageInfos := make([]types.MessageInfo, 0)
+		if messages != nil {
+			for _, message := range *messages {
+				var messageType string
+				var content string
+
+				switch msg := message.Info.AsUnion().(type) {
+				case opencode.UserMessage:
+					messageType = "user"
+					var contentParts []string
+					for _, part := range message.Parts {
+						if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+							contentParts = append(contentParts, textPart.Text)
+						}
+					}
+					content = strings.Join(contentParts, "\n")
+				case opencode.AssistantMessage:
+					messageType = "assistant"
+					if len(message.Parts) > 0 {
+						var contentParts []string
+						for _, part := range message.Parts {
+							if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+								contentParts = append(contentParts, textPart.Text)
+							}
+						}
+						content = strings.Join(contentParts, "\n")
+					}
+				default:
+					messageType = "system"
+					content = fmt.Sprintf("Unknown message type: %T", msg)
+				}
+
+				messageInfo := types.MessageInfo{
+					ID:        message.Info.ID,
+					SessionID: p.currentSessionID,
+					Type:      messageType,
+					Content:   content,
+					Timestamp: time.Now(), // Use time.Now() for safety, like in refreshMessages
+					Status:    "completed",
+				}
+				messageInfos = append(messageInfos, messageInfo)
+			}
+		}
+
+		log.Printf("[MESSAGES] Fetched %d messages for session %s", len(messageInfos), p.currentSessionID)
+		p.messages = messageInfos
+		if p.autoScroll {
+			p.scrollToBottom()
+		}
 	}
 	return nil
 }

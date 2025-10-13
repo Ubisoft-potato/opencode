@@ -316,6 +316,9 @@ func (server *SocketServer) handleClientMessages(clientConn *ClientConnection) {
 
 // processClientMessage handles a message from a client
 func (server *SocketServer) processClientMessage(clientConn *ClientConnection, message IPCMessage) {
+	log.Printf("[SERVER] Received message of type '%s' from client %s (%s)", message.Type, clientConn.PanelID, clientConn.ID)
+	marshal,_ := json.Marshal(message)
+	log.Printf("[SERVER] Received message of type '%s' data '%v'", message.Type,string(marshal))
 	switch message.Type {
 	case "state_update":
 		server.handleStateUpdate(clientConn, message)
@@ -355,7 +358,8 @@ func (server *SocketServer) handleStateUpdate(clientConn *ClientConnection, mess
 
 	// Send success response using fresh encoder
 	response := IPCMessage{
-		Type: "state_update_response",
+		Type:      "state_update_response",
+		RequestID: message.RequestID, // Echo the request ID
 		Data: map[string]interface{}{
 			"success": true,
 			"version": server.stateManager.GetState().GetCurrentVersion(),
@@ -397,11 +401,12 @@ func (server *SocketServer) handleStateRequest(clientConn *ClientConnection, mes
 		clonedState.Version.Version, clonedState.UpdateCount)
 
 	// Send current state
-	response := IPCMessage{
-		Type: "state_response",
-		Data: clonedState,
-		Timestamp: time.Now(),
-	}
+		response := IPCMessage{
+			Type:      "state_response",
+			RequestID: message.RequestID, // Echo the request ID
+			Data:      clonedState,
+			Timestamp: time.Now(),
+		}
 
 	// Debug: Manual JSON serialization check
 	if jsonData, err := json.MarshalIndent(response, "", "  "); err == nil {

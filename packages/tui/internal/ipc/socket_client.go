@@ -1,7 +1,6 @@
 package ipc
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,136 +13,54 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sst/opencode/internal/types"
 )
 
 // SocketClient manages Unix Domain Socket client for panel communication
 type SocketClient struct {
-	socketPath        string
-	panelID           string
-	panelType         string
-	conn              net.Conn
-	encoder           *json.Encoder
-	decoder           *json.Decoder
-	connectionID      string
-	isConnected       bool
-	connectionMux     sync.RWMutex
-	eventHandlers     map[types.StateEventType][]EventHandler
-	handlerMux        sync.RWMutex
-	ctx               context.Context
-	cancel            context.CancelFunc
-	reconnectDelay    time.Duration
-	maxReconnects     int
-	reconnectCount    int
-	lastPingTime      time.Time
-	pingInterval      time.Duration
-	stateResponseChan chan IPCMessage // Channel for state responses
-	currentVersion    int64           // Track current state version
-	versionMux        sync.RWMutex    // Mutex for version access
+	socketPath         string
+	panelID            string
+	panelType          string
+	conn               net.Conn
+	encoder            *json.Encoder
+	decoder            *json.Decoder
+	connectionID       string
+	isConnected        bool
+	connectionMux      sync.RWMutex
+	eventHandlers      map[types.StateEventType][]EventHandler
+	handlerMux         sync.RWMutex
+	ctx                context.Context
+	cancel             context.CancelFunc
+	reconnectDelay     time.Duration
+	maxReconnects      int
+	reconnectCount     int
+	lastPingTime       time.Time
+	pingInterval       time.Duration
+	pendingRequests    map[string]chan IPCMessage // Maps requestID to a response channel
+	pendingRequestsMux sync.Mutex                 // Mutex for pendingRequests map
+	currentVersion     int64                        // Track current state version
+	versionMux         sync.RWMutex                 // Mutex for version access
 }
 
 // EventHandler defines the signature for event handling functions
 type EventHandler func(event types.StateEvent) error
-
-// readResult stores the result of a read operation
-type readResult struct {
-	data *IPCMessage
-	err  error
-}
-
-// readJSONMessage reads a JSON message from the connection using context-controlled timeout
-func (client *SocketClient) readJSONMessage() (*IPCMessage, error) {
-	// Use context to control read timeout instead of connection deadline
-	ctx, cancel := context.WithTimeout(client.ctx, 30*time.Second)
-	defer cancel()
-
-	// Channel to receive read result
-	resultChan := make(chan readResult, 1)
-
-	// Start blocking read in goroutine
-	go func() {
-		data, err := client.readDataBlocking()
-		resultChan <- readResult{data: data, err: err}
-	}()
-
-	// Wait for either result or context timeout
-	select {
-	case result := <-resultChan:
-		return result.data, result.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("read cancelled: %w", ctx.Err())
-	}
-}
-
-// readDataBlocking performs blocking read without connection-level timeouts
-func (client *SocketClient) readDataBlocking() (*IPCMessage, error) {
-	reader := bufio.NewReader(client.conn)
-	var allData []byte
-	chunkCount := 0
-
-	// No connection deadline - rely on context cancellation
-	for {
-		// Try to read a chunk
-		chunk := make([]byte, 1024)
-		n, err := reader.Read(chunk)
-
-		if err != nil {
-			if err == io.EOF && len(allData) > 0 {
-				// EOF with data means connection closed after sending data
-				log.Printf("[CLIENT] EOF after receiving %d bytes", len(allData))
-				break
-			}
-			log.Printf("[CLIENT] Read error: %v", err)
-			return nil, err
-		}
-
-		if n > 0 {
-			chunkCount++
-			allData = append(allData, chunk[:n]...)
-			log.Printf("[CLIENT] Chunk %d: %d bytes", chunkCount, n)
-			log.Printf("[CLIENT] Content: %s", string(chunk[:n]))
-
-			// Check if we have a complete JSON message
-			var testMessage IPCMessage
-			if err := json.Unmarshal(allData, &testMessage); err == nil {
-				log.Printf("[CLIENT] Complete JSON detected after %d chunks, stopping read", chunkCount)
-				break
-			}
-		}
-	}
-
-	if len(allData) == 0 {
-		return nil, fmt.Errorf("no data received")
-	}
-
-	log.Printf("[CLIENT] Total data received: %d bytes in %d chunks", len(allData), chunkCount)
-	log.Printf("[CLIENT] Complete data: %s", string(allData))
-
-	// Parse as JSON
-	var message IPCMessage
-	if err := json.Unmarshal(allData, &message); err != nil {
-		return nil, fmt.Errorf("JSON parsing failed: %w", err)
-	}
-
-	log.Printf("[CLIENT] Successfully parsed JSON message: type=%s", message.Type)
-	return &message, nil
-}
 
 // NewSocketClient creates a new Unix Domain Socket client
 func NewSocketClient(socketPath, panelID, panelType string) *SocketClient {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &SocketClient{
-		socketPath:        socketPath,
-		panelID:           panelID,
-		panelType:         panelType,
-		eventHandlers:     make(map[types.StateEventType][]EventHandler),
-		ctx:               ctx,
-		cancel:            cancel,
-		reconnectDelay:    5 * time.Second,
-		maxReconnects:     10,
-		pingInterval:      10 * time.Second,
-		stateResponseChan: make(chan IPCMessage, 5), // Buffered channel for state responses
+		socketPath:      socketPath,
+		panelID:         panelID,
+		panelType:       panelType,
+		eventHandlers:   make(map[types.StateEventType][]EventHandler),
+		pendingRequests: make(map[string]chan IPCMessage),
+		ctx:             ctx,
+		cancel:          cancel,
+		reconnectDelay:  5 * time.Second,
+		maxReconnects:   10,
+		pingInterval:    10 * time.Second,
 	}
 }
 
@@ -164,7 +81,7 @@ func (client *SocketClient) Connect() error {
 
 	client.conn = conn
 	client.encoder = json.NewEncoder(conn)
-	// Note: Do not create decoder here as it buffers data and conflicts with readJSONMessage
+	client.decoder = json.NewDecoder(conn)
 
 	// Perform handshake
 	if err := client.performHandshake(); err != nil {
@@ -211,7 +128,6 @@ func (client *SocketClient) Disconnect() error {
 
 // performHandshake exchanges handshake messages with the server
 func (client *SocketClient) performHandshake() error {
-	// Send handshake
 	handshake := HandshakeMessage{
 		Type:      "handshake",
 		PanelID:   client.panelID,
@@ -224,30 +140,9 @@ func (client *SocketClient) performHandshake() error {
 		return fmt.Errorf("failed to send handshake: %w", err)
 	}
 
-	// Receive handshake response using manual reading to avoid buffering conflicts
-	handshakeMessage, err := client.readJSONMessage()
-	if err != nil {
-		return fmt.Errorf("failed to receive handshake response: %w", err)
-	}
-
-	// Parse the handshake response directly from the raw JSON
-	// The server sends: {"type":"handshake_response","success":true,"connection_id":"...","server_time":"..."}
 	var response HandshakeResponse
-	if handshakeMessage.Type == "handshake_response" {
-		// Extract data from the message
-		if handshakeMessage.Data != nil {
-			if err := mapToStruct(handshakeMessage.Data, &response); err != nil {
-				return fmt.Errorf("failed to parse handshake response data: %w", err)
-			}
-		} else {
-			// Data might be in the raw message itself - try parsing from original JSON
-			// Since we know the structure from the logs, set it manually
-			response.Success = true
-			response.ConnectionID = "" // Will be extracted below
-		}
-	} else {
-		response.Success = false
-		response.Error = fmt.Sprintf("unexpected handshake response type: %s", handshakeMessage.Type)
+	if err := client.decoder.Decode(&response); err != nil {
+		return fmt.Errorf("failed to receive handshake response: %w", err)
 	}
 
 	if !response.Success {
@@ -260,75 +155,114 @@ func (client *SocketClient) performHandshake() error {
 	return nil
 }
 
-// SendStateUpdate sends a state update to the server
-func (client *SocketClient) SendStateUpdate(update types.StateUpdate) error {
+// sendRequestAndWait is the new core function for synchronous request-response calls.
+func (client *SocketClient) sendRequestAndWait(message *IPCMessage, timeout time.Duration) (*IPCMessage, error) {
 	client.connectionMux.RLock()
-	defer client.connectionMux.RUnlock()
-
 	if !client.isConnected {
-		return fmt.Errorf("client is not connected")
+		client.connectionMux.RUnlock()
+		return nil, fmt.Errorf("client is not connected")
+	}
+	client.connectionMux.RUnlock()
+
+	// Generate a unique request ID
+	requestID := uuid.New().String()
+	message.RequestID = requestID
+
+	// Create a response channel for this specific request
+	respChan := make(chan IPCMessage, 1)
+
+	// Register the request
+	client.pendingRequestsMux.Lock()
+	client.pendingRequests[requestID] = respChan
+	client.pendingRequestsMux.Unlock()
+
+	// Ensure cleanup of the pending request
+	defer func() {
+		client.pendingRequestsMux.Lock()
+		delete(client.pendingRequests, requestID)
+		close(respChan)
+		client.pendingRequestsMux.Unlock()
+	}()
+
+	// Send the request
+	if err := client.encoder.Encode(message); err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
+	// Wait for the response or timeout
+	select {
+	case response, ok := <-respChan:
+		if !ok {
+			return nil, fmt.Errorf("response channel closed unexpectedly for request %s", requestID)
+		}
+		return &response, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout waiting for response for request %s", requestID)
+	}
+}
+
+// RequestState requests the current state from the server using the new sync mechanism.
+func (c *SocketClient) RequestState() (*types.SharedApplicationState, error) {
+	log.Printf("[CLIENT] Requesting initial state from panel %s", c.panelID)
+
+	message := IPCMessage{
+		Type:      "state_request",
+		Timestamp: time.Now(),
+	}
+
+	response, err := c.sendRequestAndWait(&message, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state response: %w", err)
+	}
+
+	if response.Type != "state_response" {
+		return nil, fmt.Errorf("unexpected response type: expected 'state_response', got '%s'", response.Type)
+	}
+
+	if response.Data == nil {
+		return nil, fmt.Errorf("received nil state data")
+	}
+
+	var stateData types.SharedApplicationState
+	if err := mapToStruct(response.Data, &stateData); err != nil {
+		return nil, fmt.Errorf("failed to map response data to state: %w", err)
+	}
+
+	c.setCurrentVersion(stateData.Version.Version)
+	log.Printf("[CLIENT] Successfully received and decoded state version: %d", stateData.Version.Version)
+	return &stateData, nil
+}
+
+// SendStateUpdateAndWait sends a state update and waits for a confirmation response.
+func (client *SocketClient) SendStateUpdateAndWait(update types.StateUpdate) error {
 	message := IPCMessage{
 		Type:      "state_update",
 		Data:      update,
 		Timestamp: time.Now(),
 	}
 
-	return client.encoder.Encode(message)
-}
-
-// RequestState requests the current state from the server
-func (client *SocketClient) RequestState() (*types.SharedApplicationState, error) {
-	client.connectionMux.RLock()
-	defer client.connectionMux.RUnlock()
-
-	if !client.isConnected {
-		return nil, fmt.Errorf("client is not connected")
+	response, err := client.sendRequestAndWait(&message, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to get state update response: %w", err)
 	}
 
-	message := IPCMessage{
-		Type:      "state_request",
-		Data:      nil,
-		Timestamp: time.Now(),
+	if response.Type != "state_update_response" {
+		return fmt.Errorf("unexpected response type: expected 'state_update_response', got '%s'", response.Type)
 	}
 
-	log.Printf("[CLIENT] Sending state request...")
-	if err := client.encoder.Encode(message); err != nil {
-		return nil, fmt.Errorf("failed to send state request: %w", err)
-	}
-
-	log.Printf("[CLIENT] Waiting for state_response from channel...")
-
-	// Wait for response from the message handler via channel
-	select {
-	case response := <-client.stateResponseChan:
-		log.Printf("[CLIENT] Received state response from channel: %s", response.Type)
-
-		// Verify data is not nil
-		if response.Data == nil {
-			log.Printf("[CLIENT] ERROR: Received nil data in state_response")
-			return nil, fmt.Errorf("received nil state data")
+	if responseData, ok := response.Data.(map[string]interface{}); ok {
+		if success, ok := responseData["success"].(bool); ok && success {
+			if version, ok := responseData["version"].(float64); ok {
+				client.setCurrentVersion(int64(version))
+			}
+			return nil // Success
 		}
-
-		log.Printf("[CLIENT] State response received, attempting to decode...")
-
-		var stateData types.SharedApplicationState
-		if err := mapToStruct(response.Data, &stateData); err != nil {
-			log.Printf("[CLIENT] ERROR: Failed to map response data to state: %v", err)
-			return nil, err
+		if errorMsg, ok := responseData["error"].(string); ok {
+			return fmt.Errorf("state update failed on server: %s", errorMsg)
 		}
-
-		log.Printf("[CLIENT] State decoded successfully, version: %d", stateData.Version.Version)
-		// Update current version
-		client.setCurrentVersion(stateData.Version.Version)
-		log.Printf("[CLIENT] Successfully received state data")
-		return &stateData, nil
-
-	case <-time.After(10 * time.Second):
-		log.Printf("[CLIENT] Timeout after 10 seconds - no response received via channel")
-		return nil, fmt.Errorf("timeout waiting for state response")
 	}
+
+	return fmt.Errorf("invalid state update response format")
 }
 
 // RegisterEventHandler registers a handler for specific event types
@@ -340,75 +274,63 @@ func (client *SocketClient) RegisterEventHandler(eventType types.StateEventType,
 		client.eventHandlers[eventType] = make([]EventHandler, 0)
 	}
 	client.eventHandlers[eventType] = append(client.eventHandlers[eventType], handler)
-
 	log.Printf("Registered event handler for %s", eventType)
 }
 
 // handleMessages processes incoming messages from the server
 func (client *SocketClient) handleMessages() {
 	for {
-		select {
-		case <-client.ctx.Done():
+		if client.ctx.Err() != nil {
 			return
-		default:
-			client.connectionMux.RLock()
-			connected := client.isConnected
-			client.connectionMux.RUnlock()
-
-			if !connected {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			// Use manual reading approach to avoid buffering conflicts
-			messagePtr, err := client.readJSONMessage()
-			if err != nil {
-				// Distinguish between timeout/cancellation and real connection errors
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					// Normal timeout or cancellation, continue waiting
-					continue
-				} else if isConnectionError(err) {
-					// Real connection error, trigger reconnection
-					log.Printf("Connection error: %v", err)
-					client.handleConnectionError(err)
-					return
-				} else {
-					// Other errors, log but continue
-					log.Printf("Read error (continuing): %v", err)
-					continue
-				}
-			}
-			message := *messagePtr
-
-			// Process the message
-			client.processMessage(message)
 		}
+
+		var message IPCMessage
+		err := client.decoder.Decode(&message)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || isConnectionError(err) {
+				log.Printf("Connection closed, triggering reconnect: %v", err)
+				client.handleConnectionError(err)
+				return // Exit this handler, a new one will be started on reconnect
+			}
+			log.Printf("Error decoding message: %v", err)
+			continue
+		}
+
+		client.processMessage(message)
 	}
 }
 
-// processMessage handles different types of incoming messages
+// processMessage dispatches incoming messages.
 func (client *SocketClient) processMessage(message IPCMessage) {
+	// If the message has a RequestID, it's a response to a specific request.
+	if message.RequestID != "" {
+		client.pendingRequestsMux.Lock()
+		if respChan, ok := client.pendingRequests[message.RequestID]; ok {
+			// We don't delete from the map here; the waiting function's defer does that.
+			client.pendingRequestsMux.Unlock()
+			select {
+			case respChan <- message:
+				// Response sent to the waiting goroutine
+			default:
+				log.Printf("Warning: could not send response for request %s, channel may be full or closed", message.RequestID)
+			}
+			return
+		}
+		client.pendingRequestsMux.Unlock()
+		log.Printf("Warning: received response for unknown or timed-out request ID: %s", message.RequestID)
+		return
+	}
+
+	// Otherwise, it's a broadcast event.
 	switch message.Type {
 	case "state_event":
 		client.handleStateEvent(message)
-	case "state_response":
-		// Send state_response to channel for RequestState to handle
-		select {
-		case client.stateResponseChan <- message:
-			log.Printf("[CLIENT] State response forwarded to RequestState")
-		default:
-			log.Printf("[CLIENT] Warning: state response channel full, dropping message")
-		}
 	case "pong":
 		client.handlePong(message)
 	case "error":
 		client.handleError(message)
-	case "state_update_response":
-		client.handleStateUpdateResponse(message)
-	case "state_update_error":
-		client.handleStateUpdateError(message)
 	default:
-		log.Printf("Unknown message type: %s", message.Type)
+		log.Printf("Unknown broadcast message type: %s", message.Type)
 	}
 }
 
@@ -420,25 +342,19 @@ func (client *SocketClient) handleStateEvent(message IPCMessage) {
 		return
 	}
 
-	// Update current version from event
 	client.setCurrentVersion(event.Version)
 
-	// Call registered event handlers
 	client.handlerMux.RLock()
-	handlers := client.eventHandlers[event.Type]
-	client.handlerMux.RUnlock()
+	defer client.handlerMux.RUnlock()
 
+	handlers := client.eventHandlers[event.Type]
 	for _, handler := range handlers {
 		if err := handler(event); err != nil {
 			log.Printf("Event handler error for %s: %v", event.Type, err)
 		}
 	}
 
-	// Also call wildcard handlers
-	client.handlerMux.RLock()
 	wildcardHandlers := client.eventHandlers["*"]
-	client.handlerMux.RUnlock()
-
 	for _, handler := range wildcardHandlers {
 		if err := handler(event); err != nil {
 			log.Printf("Wildcard event handler error for %s: %v", event.Type, err)
@@ -456,39 +372,6 @@ func (client *SocketClient) handleError(message IPCMessage) {
 	if errorData, ok := message.Data.(map[string]interface{}); ok {
 		if errorMsg, ok := errorData["error"].(string); ok {
 			log.Printf("Server error: %s", errorMsg)
-		}
-	}
-}
-
-// handleStateUpdateResponse processes state update responses
-func (client *SocketClient) handleStateUpdateResponse(message IPCMessage) {
-	if responseData, ok := message.Data.(map[string]interface{}); ok {
-		if success, ok := responseData["success"].(bool); ok && success {
-			// 成功时更新版本号
-			if version, ok := responseData["version"].(float64); ok {
-				client.setCurrentVersion(int64(version))
-			}
-		} else if errorMsg, ok := responseData["error"].(string); ok {
-			log.Printf("State update failed: %s", errorMsg)
-		}
-	}
-}
-
-// handleStateUpdateError processes state update error messages
-func (client *SocketClient) handleStateUpdateError(message IPCMessage) {
-	if errorData, ok := message.Data.(map[string]interface{}); ok {
-		if errorMsg, ok := errorData["error"].(string); ok {
-			log.Printf("State update error: %s", errorMsg)
-			// If it's a version conflict, refresh our state version
-			if errorMsg == "version conflict: expected 0, current 1" ||
-			   strings.Contains(errorMsg, "version conflict") {
-				log.Printf("Version conflict detected, requesting fresh state...")
-				go func() {
-					if state, err := client.RequestState(); err == nil {
-						log.Printf("State refreshed with version: %d", state.Version.Version)
-					}
-				}()
-			}
 		}
 	}
 }
@@ -511,16 +394,14 @@ func (client *SocketClient) pingLoop() {
 // sendPing sends a ping message to the server
 func (client *SocketClient) sendPing() {
 	client.connectionMux.RLock()
-	connected := client.isConnected
-	client.connectionMux.RUnlock()
-
-	if !connected {
+	if !client.isConnected {
+		client.connectionMux.RUnlock()
 		return
 	}
+	client.connectionMux.RUnlock()
 
 	message := IPCMessage{
 		Type:      "ping",
-		Data:      map[string]interface{}{"timestamp": time.Now()},
 		Timestamp: time.Now(),
 	}
 
@@ -532,27 +413,29 @@ func (client *SocketClient) sendPing() {
 
 // handleConnectionError handles connection errors and attempts reconnection
 func (client *SocketClient) handleConnectionError(err error) {
-	log.Printf("Connection error: %v", err)
-
 	client.connectionMux.Lock()
+	if !client.isConnected {
+		client.connectionMux.Unlock()
+		return // Already handling a disconnect/reconnect
+	}
 	client.isConnected = false
 	if client.conn != nil {
 		client.conn.Close()
 	}
 	client.connectionMux.Unlock()
 
-	// Attempt reconnection if under the limit
+	log.Printf("Connection error: %v", err)
+
 	if client.reconnectCount < client.maxReconnects {
 		client.reconnectCount++
-		log.Printf("Attempting reconnection %d/%d in %v",
-			client.reconnectCount, client.maxReconnects, client.reconnectDelay)
-
+		log.Printf("Attempting reconnection %d/%d in %v", client.reconnectCount, client.maxReconnects, client.reconnectDelay)
 		time.Sleep(client.reconnectDelay)
 		if err := client.Connect(); err != nil {
 			log.Printf("Reconnection failed: %v", err)
 		}
 	} else {
 		log.Printf("Maximum reconnection attempts exceeded")
+		client.cancel() // Stop all operations
 	}
 }
 
@@ -563,60 +446,19 @@ func (client *SocketClient) IsConnected() bool {
 	return client.isConnected
 }
 
-// GetConnectionInfo returns information about the current connection
-func (client *SocketClient) GetConnectionInfo() ConnectionInfo {
-	client.connectionMux.RLock()
-	defer client.connectionMux.RUnlock()
-
-	return ConnectionInfo{
-		PanelID:        client.panelID,
-		PanelType:      client.panelType,
-		ConnectionID:   client.connectionID,
-		IsConnected:    client.isConnected,
-		ReconnectCount: client.reconnectCount,
-		LastPingTime:   client.lastPingTime,
-	}
-}
-
-// ConnectionInfo contains information about the client connection
-type ConnectionInfo struct {
-	PanelID        string    `json:"panel_id"`
-	PanelType      string    `json:"panel_type"`
-	ConnectionID   string    `json:"connection_id"`
-	IsConnected    bool      `json:"is_connected"`
-	ReconnectCount int       `json:"reconnect_count"`
-	LastPingTime   time.Time `json:"last_ping_time"`
-}
-
-// isConnectionError determines if an error is a real connection error vs timeout
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	// Check for real connection errors
-	if errors.Is(err, io.EOF) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EPIPE) {
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || strings.Contains(err.Error(), "broken pipe") {
 		return true
 	}
-
-	// Check for network errors that are not timeouts
 	if netErr, ok := err.(net.Error); ok {
-		return !netErr.Timeout() // Non-timeout network errors are connection errors
+		return !netErr.Timeout()
 	}
-
 	return false
 }
 
-// GetCurrentVersion returns the current state version (thread-safe)
-func (client *SocketClient) GetCurrentVersion() int64 {
-	client.versionMux.RLock()
-	defer client.versionMux.RUnlock()
-	return client.currentVersion
-}
-
-// setCurrentVersion updates the current state version (thread-safe)
 func (client *SocketClient) setCurrentVersion(version int64) {
 	client.versionMux.Lock()
 	defer client.versionMux.Unlock()

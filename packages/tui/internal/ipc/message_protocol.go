@@ -9,6 +9,7 @@ import (
 // IPCMessage represents a message exchanged between server and clients
 type IPCMessage struct {
 	Type      string      `json:"type"`
+	RequestID string      `json:"request_id,omitempty"`
 	Data      interface{} `json:"data"`
 	Timestamp time.Time   `json:"timestamp"`
 }
