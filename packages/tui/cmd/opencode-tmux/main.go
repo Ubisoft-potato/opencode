@@ -1,26 +1,26 @@
 package main
 
 import (
-	"bufio"
-	"context"
-	"flag"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/exec"
-	"os/signal"
-	"path/filepath"
-	"strings"
-	"syscall"
-	"time"
+    "context"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "os/exec"
+    "os/signal"
+    "path/filepath"
+    "strings"
+    "syscall"
+    "time"
 
-	"github.com/sst/opencode-sdk-go"
-	"github.com/sst/opencode-sdk-go/option"
-	"github.com/sst/opencode/internal/ipc"
-	"github.com/sst/opencode/internal/persistence"
-	"github.com/sst/opencode/internal/state"
-	"github.com/sst/opencode/internal/types"
+    "github.com/sst/opencode-sdk-go"
+    "github.com/sst/opencode-sdk-go/option"
+    "github.com/sst/opencode/internal/ipc"
+    "github.com/sst/opencode/internal/persistence"
+    "github.com/sst/opencode/internal/state"
+    "github.com/sst/opencode/internal/types"
 )
 
 // TmuxOrchestrator manages the tmux session and panels
@@ -613,82 +613,238 @@ func main() {
 
 // startSSEClient starts the Server-Sent Events client for real-time updates
 func (orch *TmuxOrchestrator) startSSEClient() error {
-	eventURL := orch.serverURL + "/event"
-	log.Printf("Starting SSE client, connecting to: %s", eventURL)
+    // Replace raw SSE parsing with typed SDK streaming
+    log.Printf("Starting typed event stream client via SDK")
 
-	go func() {
-		for {
-			select {
-			case <-orch.ctx.Done():
-				log.Printf("SSE client stopping due to context cancellation")
-				return
-			default:
-				if err := orch.connectSSE(eventURL); err != nil {
-					log.Printf("SSE connection error: %v, retrying in 5 seconds...", err)
-					time.Sleep(5 * time.Second)
-				}
-			}
-		}
-	}()
+    go func() {
+        for {
+            select {
+            case <-orch.ctx.Done():
+                log.Printf("Event stream stopping due to context cancellation")
+                return
+            default:
+                // Open a new stream filtered by project directory
+                stream := orch.httpClient.Event.ListStreaming(
+                    orch.ctx,
+                    opencode.EventListParams{
+                        Directory: opencode.F("/Users/hhx/work/upwork/opencode"),
+                    },
+                )
 
-	return nil
+                for stream.Next() {
+                    evt := stream.Current()
+                    orch.handleTypedEvent(evt)
+                }
+
+                // Capture error, close, and backoff before retrying
+                if err := stream.Err(); err != nil {
+                    log.Printf("Event stream error: %v", err)
+                }
+                _ = stream.Close()
+                log.Printf("Event stream closed; retrying in 5 seconds...")
+                time.Sleep(5 * time.Second)
+            }
+        }
+    }()
+
+    return nil
 }
 
-// connectSSE establishes an SSE connection and processes events
-func (orch *TmuxOrchestrator) connectSSE(eventURL string) error {
-	req, err := http.NewRequestWithContext(orch.ctx, "GET", eventURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create SSE request: %w", err)
-	}
+// handleTypedEvent processes typed SDK events
+func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
+    switch evt.Type {
+    case opencode.EventListResponseTypeMessageUpdated:
+        // Cast to typed union variant
+        uni := evt.AsUnion()
+        if v, ok := uni.(opencode.EventListResponseEventMessageUpdated); ok {
+            info := v.Properties.Info
 
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Cache-Control", "no-cache")
+            // Create or refresh local message metadata; content will be built by parts
+            msg := types.MessageInfo{
+                ID:        info.ID,
+                SessionID: info.SessionID,
+                Type:      string(info.Role),
+                Content:   "",
+                Timestamp: time.Now(),
+                Status:    "pending",
+            }
+            if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
+                log.Printf("[SSE] Failed to add message: %v", err)
+            } else {
+                log.Printf("[SSE] Message metadata added: %s", msg.ID)
+            }
+        } else {
+            log.Printf("[SSE] Unexpected union type for message.updated")
+        }
 
-	resp, err := orch.sseClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect to SSE endpoint: %w", err)
-	}
-	defer resp.Body.Close()
+    case opencode.EventListResponseTypeMessagePartUpdated:
+        uni := evt.AsUnion()
+        if v, ok := uni.(opencode.EventListResponseEventMessagePartUpdated); ok {
+            part := v.Properties.Part
+            // Append text to message content
+            messageID := part.MessageID
+            appended := part.Text
+            if appended == "" {
+                // nothing to append
+                return
+            }
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("SSE endpoint returned status %d", resp.StatusCode)
-	}
+            // Get current content for the message and append
+            st := orch.syncManager.GetState()
+            cur := ""
+            exists := false
+            for _, m := range st.Messages {
+                if m.ID == messageID {
+                    cur = m.Content
+                    exists = true
+                    break
+                }
+            }
+            // If message doesn't exist yet (part arrived before metadata), create it
+            if !exists {
+                placeholder := types.MessageInfo{
+                    ID:        messageID,
+                    SessionID: part.SessionID,
+                    Type:      "assistant",
+                    Content:   "",
+                    Timestamp: time.Now(),
+                    Status:    "pending",
+                }
+                if err := orch.syncManager.AddMessage(placeholder, "sse"); err != nil {
+                    log.Printf("[SSE] Failed to create placeholder message %s: %v", messageID, err)
+                }
+            }
+            newContent := cur + appended
 
-	log.Printf("SSE client connected successfully")
+            if err := orch.syncManager.UpdateMessage(messageID, newContent, "", "sse"); err != nil {
+                log.Printf("[SSE] Failed to append part to message %s: %v", messageID, err)
+            }
+        } else {
+            log.Printf("[SSE] Unexpected union type for message.part.updated")
+        }
 
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
+    case opencode.EventListResponseTypeMessageRemoved:
+        uni := evt.AsUnion()
+        if v, ok := uni.(opencode.EventListResponseEventMessageRemoved); ok {
+            // Construct a deletion update with optimistic version check
+            upd := types.StateUpdate{
+                ID:              fmt.Sprintf("del_%s_%d", v.Properties.MessageID, time.Now().UnixNano()),
+                Type:            types.MessageDeleted,
+                ExpectedVersion: orch.syncManager.GetState().GetCurrentVersion(),
+                Payload:         types.MessageDeletePayload{MessageID: v.Properties.MessageID},
+                SourcePanel:     "sse",
+                Timestamp:       time.Now(),
+            }
+            if err := orch.syncManager.UpdateWithVersionCheck(upd); err != nil {
+                log.Printf("[SSE] Failed to delete message %s: %v", v.Properties.MessageID, err)
+            }
+        } else {
+            log.Printf("[SSE] Unexpected union type for message.removed")
+        }
 
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			orch.handleSSEEvent(data)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("SSE scanner error: %w", err)
-	}
-
-	return nil
+    default:
+        // Log unhandled event types for future mapping
+        log.Printf("[SSE] Unhandled event type: %s", string(evt.Type))
+    }
 }
 
 // handleSSEEvent processes incoming SSE events
 func (orch *TmuxOrchestrator) handleSSEEvent(data string) {
-	log.Printf("[SSE] Received event: %s", data)
+    log.Printf("[SSE] Received event: %s", data)
 
-	// For now, just log the events
-	// Later we can parse and route specific events to the IPC state manager
-	// For example:
-	// - Session updates
-	// - Message updates
-	// - Assistant responses
-	// - System notifications
+    type envelope struct {
+        Type       string          `json:"type"`
+        Properties json.RawMessage `json:"properties"`
+    }
+
+    var env envelope
+    if err := json.Unmarshal([]byte(data), &env); err != nil {
+        log.Printf("[SSE] Failed to decode event envelope: %v", err)
+        return
+    }
+
+    switch env.Type {
+    case "message.updated":
+        // properties: { info: Message }
+        type messageUpdatedProps struct {
+            Info opencode.Message `json:"info"`
+        }
+        var props messageUpdatedProps
+        if err := json.Unmarshal(env.Properties, &props); err != nil {
+            log.Printf("[SSE] Failed to decode message.updated properties: %v", err)
+            return
+        }
+
+        // Map to local MessageInfo and add to state
+        msgType := string(props.Info.Role)
+        message := types.MessageInfo{
+            ID:        props.Info.ID,
+            SessionID: props.Info.SessionID,
+            Type:      msgType,
+            Content:   "",
+            Timestamp: time.Now(),
+            Status:    "pending",
+        }
+
+        if err := orch.syncManager.AddMessage(message, "sse"); err != nil {
+            log.Printf("[SSE] Failed to add message to state: %v", err)
+            return
+        }
+        log.Printf("[SSE] Message added to state: %s", message.ID)
+
+    case "message.part.updated":
+        // properties: { part: { messageID, text, type, ... } }
+        type partProps struct {
+            Part struct {
+                MessageID string `json:"messageID"`
+                Text      string `json:"text"`
+                Type      string `json:"type"`
+            } `json:"part"`
+        }
+        var props partProps
+        if err := json.Unmarshal(env.Properties, &props); err != nil {
+            log.Printf("[SSE] Failed to decode message.part.updated properties: %v", err)
+            return
+        }
+
+        // Update message content; parts aggregation not required for panel
+        if err := orch.syncManager.UpdateMessage(props.Part.MessageID, props.Part.Text, "", "sse"); err != nil {
+            log.Printf("[SSE] Failed to update message content: %v", err)
+            return
+        }
+        log.Printf("[SSE] Message content updated: %s (%d chars)", props.Part.MessageID, len(props.Part.Text))
+
+    case "message.removed":
+        // properties: { messageID, sessionID }
+        type messageRemovedProps struct {
+            MessageID string `json:"messageID"`
+            SessionID string `json:"sessionID"`
+        }
+        var props messageRemovedProps
+        if err := json.Unmarshal(env.Properties, &props); err != nil {
+            log.Printf("[SSE] Failed to decode message.removed properties: %v", err)
+            return
+        }
+
+        // Construct a state update for deletion and apply via manager
+        update := types.StateUpdate{
+            ID:              time.Now().Format("20060102150405.000000"),
+            Type:            types.MessageDeleted,
+            ExpectedVersion: orch.syncManager.GetState().GetCurrentVersion(),
+            Payload:         types.MessageDeletePayload{MessageID: props.MessageID},
+            SourcePanel:     "sse",
+            Timestamp:       time.Now(),
+        }
+        if err := orch.syncManager.UpdateWithVersionCheck(update); err != nil {
+            log.Printf("[SSE] Failed to delete message in state: %v", err)
+            return
+        }
+        log.Printf("[SSE] Message deleted from state: %s", props.MessageID)
+
+    default:
+        // For other event types, just log for now
+        log.Printf("[SSE] Unhandled event type: %s", env.Type)
+    }
 }
 
 // loadSessionsFromServer loads existing sessions from OpenCode server into local state
@@ -734,8 +890,68 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 		log.Printf("Loaded session: %s (%s)", sessionInfo.Title, sessionInfo.ID)
 	}
 
-	log.Printf("Successfully loaded %d sessions from server", len(*sessions))
-	return nil
+    // After loading sessions, eagerly load message history for each session so
+    // the messages panel shows content on startup and session counts are correct.
+    for _, serverSession := range *sessions {
+        sid := serverSession.ID
+        msgs, err := orch.httpClient.Session.Messages(ctx, sid, opencode.SessionMessagesParams{})
+        if err != nil {
+            log.Printf("Warning: Failed to load messages for session %s: %v", sid, err)
+            continue
+        }
+        if msgs == nil || len(*msgs) == 0 {
+            log.Printf("No messages found for session %s", sid)
+            continue
+        }
+
+        for _, m := range *msgs {
+            var messageType string
+            var contentParts []string
+
+            switch info := m.Info.AsUnion().(type) {
+            case opencode.UserMessage:
+                messageType = "user"
+            case opencode.AssistantMessage:
+                messageType = "assistant"
+                _ = info // suppress unused in switch
+            default:
+                messageType = "system"
+            }
+
+            for _, part := range m.Parts {
+                if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+                    contentParts = append(contentParts, textPart.Text)
+                }
+            }
+
+            mi := types.MessageInfo{
+                ID:        m.Info.ID,
+                SessionID: sid,
+                Type:      messageType,
+                Content:   strings.Join(contentParts, "\n"),
+                Timestamp: time.Now(),
+                Status:    "completed",
+            }
+
+            if err := orch.syncManager.AddMessage(mi, "server-sync"); err != nil {
+                log.Printf("Warning: Failed to add message %s for session %s: %v", mi.ID, sid, err)
+            }
+        }
+    }
+
+    // If no current session selected, choose the first one for consistency
+    st := orch.syncManager.GetState()
+    if st.CurrentSessionID == "" && len(st.Sessions) > 0 {
+        first := st.Sessions[0].ID
+        if err := orch.syncManager.UpdateSessionSelection(first, "server-sync"); err != nil {
+            log.Printf("Warning: failed to set default session selection: %v", err)
+        } else {
+            log.Printf("Default session selected: %s", first)
+        }
+    }
+
+    log.Printf("Successfully loaded %d sessions from server", len(*sessions))
+    return nil
 }
 
 // parseServerTime safely converts a server timestamp to a time.Time object.

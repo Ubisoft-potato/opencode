@@ -41,7 +41,7 @@ type InputPanel struct {
 	isMultiline      bool
 	showHelp         bool
 	lastCommand      string
-	version          int64
+    version          int64
 }
 
 // NewInputPanel creates a new input panel
@@ -194,6 +194,37 @@ func (p *InputPanel) expectedVersion() int64 {
         return 1
     }
     return v
+}
+
+// sendUpdateWithRetry sends a state update with optimistic concurrency and resolves
+// version conflicts by refreshing the latest state version and retrying once.
+func (p *InputPanel) sendUpdateWithRetry(update types.StateUpdate) (int64, error) {
+    // First attempt with our best-known version
+    update.ExpectedVersion = p.expectedVersion()
+    newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
+    if err == nil {
+        p.version = newVersion
+        return newVersion, nil
+    }
+
+    // If we hit a version conflict, refresh the version and retry once
+    if strings.Contains(err.Error(), "version conflict") {
+        // Try to refresh current version via state request
+        if currentState, reqErr := p.ipcClient.RequestState(); reqErr == nil && currentState != nil {
+            p.version = currentState.Version.Version
+        }
+
+        update.ExpectedVersion = p.expectedVersion()
+        if newVersion2, err2 := p.ipcClient.SendStateUpdateAndWait(update); err2 == nil {
+            p.version = newVersion2
+            return newVersion2, nil
+        } else {
+            return 0, err2
+        }
+    }
+
+    // Non-conflict error, propagate
+    return 0, err
 }
 
 // View renders the input panel
@@ -544,14 +575,13 @@ func (p *InputPanel) sendMessage() tea.Cmd {
             Payload:         types.MessageAddPayload{Message: messageInfo},
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
         }
-
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
+        }
 
 		// Send to OpenCode API
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -613,12 +643,12 @@ func (p *InputPanel) sendMessage() tea.Cmd {
                 ExpectedVersion: p.expectedVersion(),
             }
 
-			if newVersion, err := p.ipcClient.SendStateUpdateAndWait(assistantUpdate); err != nil {
-				log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
-			} else {
-				p.version = newVersion
-				log.Printf("[INPUT] Successfully added assistant response to state")
-			}
+            if newVersion, err := p.sendUpdateWithRetry(assistantUpdate); err != nil {
+                log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
+            } else {
+                p.version = newVersion
+                log.Printf("[INPUT] Successfully added assistant response to state")
+            }
 		}
 
 		return MessageSentMsg{Message: messageInfo}
@@ -738,7 +768,7 @@ func (p *InputPanel) handleInputEvent(event types.StateEvent) (tea.Model, tea.Cm
 // Sync methods
 
 func (p *InputPanel) syncInputState() tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
         update := types.StateUpdate{
             Type: types.InputUpdated,
             Payload: types.InputUpdatePayload{
@@ -750,21 +780,20 @@ func (p *InputPanel) syncInputState() tea.Cmd {
             },
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
         }
 
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
-
-		return nil
-	}
+        return nil
+    }
 }
 
 func (p *InputPanel) syncCursorPosition() tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
         update := types.StateUpdate{
             Type: types.CursorMoved,
             Payload: types.CursorMovePayload{
@@ -774,17 +803,16 @@ func (p *InputPanel) syncCursorPosition() tea.Cmd {
             },
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
         }
 
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
-
-		return nil
-	}
+        return nil
+    }
 }
 
 // Command implementations
@@ -803,7 +831,7 @@ func (p *InputPanel) clearMessages() tea.Cmd {
 }
 
 func (p *InputPanel) createNewSession() tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
 		// Generate a default title with timestamp
 		title := fmt.Sprintf("New Session %s", time.Now().Format("15:04:05"))
 
@@ -838,43 +866,42 @@ func (p *InputPanel) createNewSession() tea.Cmd {
             },
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
         }
 
-		// Send the update via IPC
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			log.Printf("[INPUT] Failed to send session state update: %v", err)
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
+        // Send the update via IPC
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            log.Printf("[INPUT] Failed to send session state update: %v", err)
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
+        }
 
 		return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
 	}
 }
 
 func (p *InputPanel) switchToSession(sessionID string) tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
         update := types.StateUpdate{
             Type:            types.SessionChanged,
             Payload:         types.SessionChangePayload{SessionID: sessionID},
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
         }
 
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
-
-		return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
-	}
+        return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
+    }
 }
 
 func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
 		// Delete session on OpenCode server first
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -896,83 +923,79 @@ func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
 		log.Printf("[INPUT] Successfully deleted session on OpenCode server: %s", sessionID)
 
 		// Now update local state
-		update := types.StateUpdate{
-			Type:            types.SessionDeleted,
-			Payload:         types.SessionDeletePayload{SessionID: sessionID},
-			SourcePanel:     "input-panel",
-			Timestamp:       time.Now(),
-			ExpectedVersion: p.version,
-		}
-
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			log.Printf("[INPUT] Failed to send session delete state update: %v", err)
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
+        update := types.StateUpdate{
+            Type:            types.SessionDeleted,
+            Payload:         types.SessionDeletePayload{SessionID: sessionID},
+            SourcePanel:     "input-panel",
+            Timestamp:       time.Now(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            log.Printf("[INPUT] Failed to send session delete state update: %v", err)
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
+        }
 
 		return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
 	}
 }
 
 func (p *InputPanel) changeTheme(theme string) tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
         update := types.StateUpdate{
             Type:            types.ThemeChanged,
             Payload:         types.ThemeChangePayload{Theme: theme},
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
         }
 
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
-
-		return InfoMsg{Message: fmt.Sprintf("Theme changed to %s", theme)}
-	}
+        return InfoMsg{Message: fmt.Sprintf("Theme changed to %s", theme)}
+    }
 }
 
 func (p *InputPanel) changeModel(provider, model string) tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
         update := types.StateUpdate{
             Type:            types.ModelChanged,
             Payload:         types.ModelChangePayload{Provider: provider, Model: model},
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
         }
 
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
-
-		return InfoMsg{Message: fmt.Sprintf("Model changed to %s/%s", provider, model)}
-	}
+        return InfoMsg{Message: fmt.Sprintf("Model changed to %s/%s", provider, model)}
+    }
 }
 
 func (p *InputPanel) changeAgent(agent string) tea.Cmd {
-	return func() tea.Msg {
+    return func() tea.Msg {
         update := types.StateUpdate{
             Type:            types.AgentChanged,
             Payload:         types.AgentChangePayload{Agent: agent},
             SourcePanel:     "input-panel",
             Timestamp:       time.Now(),
-            ExpectedVersion: p.expectedVersion(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
         }
 
-		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
-			return ErrorMsg{Error: err}
-		} else {
-			p.version = newVersion
-		}
-
-		return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
-	}
+        return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
+    }
 }
 
 // renderInput renders the input panel

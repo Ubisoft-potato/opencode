@@ -334,14 +334,25 @@ func (manager *PanelSyncManager) applyUpdateWithEvents(update types.StateUpdate)
 
 // UpdateWithVersionCheck applies a state update with optimistic locking
 func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate) error {
-	manager.syncMutex.Lock()
-	defer manager.syncMutex.Unlock()
+    manager.syncMutex.Lock()
+    defer manager.syncMutex.Unlock()
 
-	// Check for version conflicts (optimistic locking)
-	if manager.state.Version.Version != update.ExpectedVersion {
-		return fmt.Errorf("version conflict: expected %d, current %d",
-			update.ExpectedVersion, manager.state.Version.Version)
-	}
+    // Check for version conflicts (optimistic locking)
+    if manager.state.Version.Version != update.ExpectedVersion {
+        // Attempt to resolve the conflict using the configured resolver
+        if manager.conflictResolver != nil {
+            result := manager.conflictResolver.ResolveConflict(manager, update)
+            if result != nil && result.Success {
+                // Conflict resolved and update applied within resolver path
+                // Return early to avoid double application/broadcast
+                return nil
+            }
+            // If resolver did not succeed, fall through to original error
+        }
+
+        return fmt.Errorf("version conflict: expected %d, current %d",
+            update.ExpectedVersion, manager.state.Version.Version)
+    }
 
 	// Apply the update based on its type
 	switch update.Type {
@@ -369,6 +380,66 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		}
 		if !manager.state.RemoveSession(payload.SessionID) {
 			return fmt.Errorf("session %s not found for deletion", payload.SessionID)
+		}
+
+	case types.MessageAdded:
+		var payload types.MessageAddPayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		// Append message to state
+		manager.state.Messages = append(manager.state.Messages, payload.Message)
+		// Update session message count if session exists
+		for i := range manager.state.Sessions {
+			if manager.state.Sessions[i].ID == payload.Message.SessionID {
+				manager.state.Sessions[i].MessageCount++
+				break
+			}
+		}
+		// Set current message pointer
+		msg := payload.Message
+		manager.state.CurrentMessage = &msg
+
+	case types.MessageUpdated:
+		var payload types.MessageUpdatePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		for i := range manager.state.Messages {
+			if manager.state.Messages[i].ID == payload.MessageID {
+				if payload.Content != "" {
+					manager.state.Messages[i].Content = payload.Content
+				}
+				if payload.Status != "" {
+					manager.state.Messages[i].Status = payload.Status
+				}
+				if payload.Parts != nil {
+					manager.state.Messages[i].Parts = payload.Parts
+				}
+				break
+			}
+		}
+
+	case types.MessageDeleted:
+		var payload types.MessageDeletePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		// Find message and remove it; adjust session count
+		for i := range manager.state.Messages {
+			if manager.state.Messages[i].ID == payload.MessageID {
+				// adjust session count
+				sid := manager.state.Messages[i].SessionID
+				for j := range manager.state.Sessions {
+					if manager.state.Sessions[j].ID == sid && manager.state.Sessions[j].MessageCount > 0 {
+						manager.state.Sessions[j].MessageCount--
+						break
+					}
+				}
+				// remove message
+				manager.state.Messages = append(manager.state.Messages[:i], manager.state.Messages[i+1:]...)
+				break
+			}
 		}
 
 	case types.InputUpdated:
@@ -399,6 +470,21 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 			return err
 		}
 		manager.state.Theme = payload.Theme
+
+	case types.ModelChanged:
+		var payload types.ModelChangePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		manager.state.Provider = payload.Provider
+		manager.state.Model = payload.Model
+
+	case types.AgentChanged:
+		var payload types.AgentChangePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		manager.state.Agent = payload.Agent
 
 	default:
 		log.Printf("Warning: unhandled update type in UpdateWithVersionCheck: %s. Bumping version only.", update.Type)
