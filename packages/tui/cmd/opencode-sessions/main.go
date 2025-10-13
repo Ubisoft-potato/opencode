@@ -84,6 +84,20 @@ func (p *SessionsPanel) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// expectedVersion returns a safe ExpectedVersion for updates.
+// Prefer the client's server-known version; if unavailable (0), fall back to local panel version;
+// and as a last resort use 1 (initial state version).
+func (p *SessionsPanel) expectedVersion() int64 {
+    v := p.ipcClient.GetCurrentVersion()
+    if v <= 0 {
+        if p.version > 0 {
+            return p.version
+        }
+        return 1
+    }
+    return v
+}
+
 // Update handles messages and updates the panel state
 func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -170,17 +184,17 @@ func (p *SessionsPanel) selectCurrentSession() tea.Cmd {
 		session := p.sessions[p.currentIndex]
 		log.Printf("[SESSIONS] Selecting session: %s (index: %d)", session.ID, p.currentIndex)
 
-		return func() tea.Msg {
-			versionToSend := p.version // Use version from model state
-			log.Printf("[SESSIONS] Sending update with ExpectedVersion: %d", versionToSend)
+        return func() tea.Msg {
+            versionToSend := p.expectedVersion()
+            log.Printf("[SESSIONS] Sending update with ExpectedVersion: %d", versionToSend)
 
-			update := types.StateUpdate{
-				Type:            types.SessionChanged,
-				ExpectedVersion: versionToSend,
-				Payload:         types.SessionChangePayload{SessionID: session.ID},
-				SourcePanel:     "sessions-panel",
-				Timestamp:       time.Now(),
-			}
+            update := types.StateUpdate{
+                Type:            types.SessionChanged,
+                ExpectedVersion: versionToSend,
+                Payload:         types.SessionChangePayload{SessionID: session.ID},
+                SourcePanel:     "sessions-panel",
+                Timestamp:       time.Now(),
+            }
 
 			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 			if err != nil {
@@ -217,13 +231,13 @@ func (p *SessionsPanel) createNewSession() tea.Cmd {
 		}
 
 		// Send update
-		update := types.StateUpdate{
-			Type:            types.SessionAdded,
-			ExpectedVersion: p.version,
-			Payload:         types.SessionAddPayload{Session: sessionInfo},
-			SourcePanel:     "sessions-panel",
-			Timestamp:       time.Now(),
-		}
+        update := types.StateUpdate{
+            Type:            types.SessionAdded,
+            ExpectedVersion: p.expectedVersion(),
+            Payload:         types.SessionAddPayload{Session: sessionInfo},
+            SourcePanel:     "sessions-panel",
+            Timestamp:       time.Now(),
+        }
 
 		newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 		if err != nil {
@@ -246,13 +260,13 @@ func (p *SessionsPanel) deleteCurrentSession() tea.Cmd {
 			}
 
 			// Send update
-			update := types.StateUpdate{
-				Type:            types.SessionDeleted,
-				ExpectedVersion: p.version,
-				Payload:         types.SessionDeletePayload{SessionID: sessionID},
-				SourcePanel:     "sessions-panel",
-				Timestamp:       time.Now(),
-			}
+        update := types.StateUpdate{
+            Type:            types.SessionDeleted,
+            ExpectedVersion: p.expectedVersion(),
+            Payload:         types.SessionDeletePayload{SessionID: sessionID},
+            SourcePanel:     "sessions-panel",
+            Timestamp:       time.Now(),
+        }
 
 			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 			if err != nil {

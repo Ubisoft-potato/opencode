@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -23,19 +24,20 @@ import (
 
 // MessagesPanel manages the message history panel
 type MessagesPanel struct {
-	client           *opencode.Client
-	ipcClient        *ipc.SocketClient
-	messages         []types.MessageInfo
-	currentSessionID string
-	scrollOffset     int
-	width            int
-	height           int
-	ctx              context.Context
-	cancel           context.CancelFunc
-	autoScroll       bool
-	showTimestamps   bool
-	isStreaming      bool
-	currentMessage   *types.MessageInfo
+    client           *opencode.Client
+    ipcClient        *ipc.SocketClient
+    messages         []types.MessageInfo
+    currentSessionID string
+    scrollOffset     int
+    width            int
+    height           int
+    ctx              context.Context
+    cancel           context.CancelFunc
+    autoScroll       bool
+    showTimestamps   bool
+    isStreaming      bool
+    currentMessage   *types.MessageInfo
+    version          int64
 }
 
 // NewMessagesPanel creates a new messages panel
@@ -60,11 +62,14 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
 	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.handleSessionChanged)
 	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.handleStateSync)
 
+	// Wildcard handler to log receipt of any event type for diagnostics
+	panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
+
 	return panel
 }
 
 // Init initializes the panel
-func (p MessagesPanel) Init() tea.Cmd {
+func (p *MessagesPanel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
 	// Connect to IPC server
@@ -93,7 +98,7 @@ func (p MessagesPanel) Init() tea.Cmd {
 }
 
 // Update handles messages and updates the panel state
-func (p MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		p.width = msg.Width
@@ -131,7 +136,7 @@ func (p MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the messages panel
-func (p MessagesPanel) View() string {
+func (p *MessagesPanel) View() string {
 	if len(p.messages) == 0 {
 		return p.renderEmptyState()
 	}
@@ -140,7 +145,7 @@ func (p MessagesPanel) View() string {
 }
 
 // handleKeyPress processes keyboard input
-func (p MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return p, tea.Quit
@@ -197,7 +202,7 @@ func (p MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // refreshMessages refreshes messages from the API
-func (p MessagesPanel) refreshMessages() tea.Cmd {
+func (p *MessagesPanel) refreshMessages() tea.Cmd {
 	if p.currentSessionID == "" {
 		return nil
 	}
@@ -258,7 +263,7 @@ func (p MessagesPanel) refreshMessages() tea.Cmd {
 }
 
 // startEventStream starts listening for streaming events
-func (p MessagesPanel) startEventStream() tea.Cmd {
+func (p *MessagesPanel) startEventStream() tea.Cmd {
 	return func() tea.Msg {
 		// This would normally set up streaming from the OpenCode API
 		// For now, we'll just return a placeholder
@@ -269,131 +274,170 @@ func (p MessagesPanel) startEventStream() tea.Cmd {
 // Event handlers
 
 func (p *MessagesPanel) handleMessageAdded(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.MessageAddPayload); ok {
-		if payload.Message.SessionID == p.currentSessionID {
-			p.messages = append(p.messages, payload.Message)
-			if p.autoScroll {
-				p.scrollToBottom()
-			}
-		}
-		log.Printf("Message added: %s", payload.Message.ID)
-	}
-	return nil
+    p.version = event.Version
+    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+        var payload types.MessageAddPayload
+        if err := decodePayload(payloadMap, &payload); err == nil {
+            if payload.Message.SessionID == p.currentSessionID {
+                p.messages = append(p.messages, payload.Message)
+                if p.autoScroll {
+                    p.scrollToBottom()
+                }
+            }
+            log.Printf("[MESSAGES] v%v Message added: %s", event.Version, payload.Message.ID)
+        }
+    }
+    return nil
 }
 
 func (p *MessagesPanel) handleMessageUpdated(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.MessageUpdatePayload); ok {
-		for i, message := range p.messages {
-			if message.ID == payload.MessageID {
-				if payload.Content != "" {
-					p.messages[i].Content = payload.Content
-				}
-				if payload.Status != "" {
-					p.messages[i].Status = payload.Status
-				}
-				p.messages[i].Timestamp = time.Now()
-				break
-			}
-		}
-		log.Printf("Message updated: %s", payload.MessageID)
-	}
-	return nil
+    p.version = event.Version
+    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+        var payload types.MessageUpdatePayload
+        if err := decodePayload(payloadMap, &payload); err == nil {
+            for i, message := range p.messages {
+                if message.ID == payload.MessageID {
+                    if payload.Content != "" {
+                        p.messages[i].Content = payload.Content
+                    }
+                    if payload.Status != "" {
+                        p.messages[i].Status = payload.Status
+                    }
+                    p.messages[i].Timestamp = time.Now()
+                    break
+                }
+            }
+            log.Printf("[MESSAGES] v%v Message updated: %s", event.Version, payload.MessageID)
+        }
+    }
+    return nil
 }
 
 func (p *MessagesPanel) handleMessageDeleted(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.MessageDeletePayload); ok {
-		for i, message := range p.messages {
-			if message.ID == payload.MessageID {
-				p.messages = append(p.messages[:i], p.messages[i+1:]...)
-				break
-			}
-		}
-		log.Printf("Message deleted: %s", payload.MessageID)
-	}
-	return nil
+    p.version = event.Version
+    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+        var payload types.MessageDeletePayload
+        if err := decodePayload(payloadMap, &payload); err == nil {
+            for i, message := range p.messages {
+                if message.ID == payload.MessageID {
+                    p.messages = append(p.messages[:i], p.messages[i+1:]...)
+                    break
+                }
+            }
+            log.Printf("[MESSAGES] v%v Message deleted: %s", event.Version, payload.MessageID)
+        }
+    }
+    return nil
 }
 
 func (p *MessagesPanel) handleSessionChanged(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.SessionChangePayload); ok {
-		log.Printf("[MESSAGES] Session changed to: %s", payload.SessionID)
-		p.currentSessionID = payload.SessionID
-		p.scrollOffset = 0
+    p.version = event.Version
+    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+        var payload types.SessionChangePayload
+        if err := decodePayload(payloadMap, &payload); err == nil {
+            log.Printf("[MESSAGES] v%v Session changed to: %s", event.Version, payload.SessionID)
+            p.currentSessionID = payload.SessionID
+            p.scrollOffset = 0
 
-		// Fetch messages for the new session
-		messages, err := p.client.Session.Messages(p.ctx, p.currentSessionID, opencode.SessionMessagesParams{})
-		if err != nil {
-			log.Printf("[MESSAGES] Error fetching messages for session %s: %v", p.currentSessionID, err)
-			p.messages = make([]types.MessageInfo, 0) // Clear messages on error
-			return nil
-		}
+            // Fetch messages for the new session
+            messages, err := p.client.Session.Messages(p.ctx, p.currentSessionID, opencode.SessionMessagesParams{})
+            if err != nil {
+                log.Printf("[MESSAGES] Error fetching messages for session %s: %v", p.currentSessionID, err)
+                p.messages = make([]types.MessageInfo, 0) // Clear messages on error
+                return nil
+            }
 
-		// Convert to state format
-		messageInfos := make([]types.MessageInfo, 0)
-		if messages != nil {
-			for _, message := range *messages {
-				var messageType string
-				var content string
+            // Convert to state format
+            messageInfos := make([]types.MessageInfo, 0)
+            if messages != nil {
+                for _, message := range *messages {
+                    var messageType string
+                    var content string
 
-				switch msg := message.Info.AsUnion().(type) {
-				case opencode.UserMessage:
-					messageType = "user"
-					var contentParts []string
-					for _, part := range message.Parts {
-						if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
-							contentParts = append(contentParts, textPart.Text)
-						}
-					}
-					content = strings.Join(contentParts, "\n")
-				case opencode.AssistantMessage:
-					messageType = "assistant"
-					if len(message.Parts) > 0 {
-						var contentParts []string
-						for _, part := range message.Parts {
-							if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
-								contentParts = append(contentParts, textPart.Text)
-							}
-						}
-						content = strings.Join(contentParts, "\n")
-					}
-				default:
-					messageType = "system"
-					content = fmt.Sprintf("Unknown message type: %T", msg)
-				}
+                    switch msg := message.Info.AsUnion().(type) {
+                    case opencode.UserMessage:
+                        messageType = "user"
+                        var contentParts []string
+                        for _, part := range message.Parts {
+                            if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+                                contentParts = append(contentParts, textPart.Text)
+                            }
+                        }
+                        content = strings.Join(contentParts, "\n")
+                    case opencode.AssistantMessage:
+                        messageType = "assistant"
+                        if len(message.Parts) > 0 {
+                            var contentParts []string
+                            for _, part := range message.Parts {
+                                if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+                                    contentParts = append(contentParts, textPart.Text)
+                                }
+                            }
+                            content = strings.Join(contentParts, "\n")
+                        }
+                    default:
+                        messageType = "system"
+                        content = fmt.Sprintf("Unknown message type: %T", msg)
+                    }
 
-				messageInfo := types.MessageInfo{
-					ID:        message.Info.ID,
-					SessionID: p.currentSessionID,
-					Type:      messageType,
-					Content:   content,
-					Timestamp: time.Now(), // Use time.Now() for safety, like in refreshMessages
-					Status:    "completed",
-				}
-				messageInfos = append(messageInfos, messageInfo)
-			}
-		}
+                    messageInfo := types.MessageInfo{
+                        ID:        message.Info.ID,
+                        SessionID: p.currentSessionID,
+                        Type:      messageType,
+                        Content:   content,
+                        Timestamp: time.Now(), // Use time.Now() for safety, like in refreshMessages
+                        Status:    "completed",
+                    }
+                    messageInfos = append(messageInfos, messageInfo)
+                }
+            }
 
-		log.Printf("[MESSAGES] Fetched %d messages for session %s", len(messageInfos), p.currentSessionID)
-		p.messages = messageInfos
-		if p.autoScroll {
-			p.scrollToBottom()
-		}
-	}
-	return nil
+            log.Printf("[MESSAGES] v%v Fetched %d messages for session %s", event.Version, len(messageInfos), p.currentSessionID)
+            p.messages = messageInfos
+            if p.autoScroll {
+                p.scrollToBottom()
+            }
+        }
+    }
+    return nil
 }
 
 func (p *MessagesPanel) handleStateSync(event state.StateEvent) error {
-	if payload, ok := event.Data.(types.StateSyncPayload); ok {
-		p.currentSessionID = payload.State.CurrentSessionID
-		p.messages = p.filterMessagesForSession(payload.State.Messages, p.currentSessionID)
-		if p.autoScroll {
-			p.scrollToBottom()
-		}
-		log.Printf("State synchronized")
-	}
-	return nil
+    p.version = event.Version
+    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+        var payload types.StateSyncPayload
+        if err := decodePayload(payloadMap, &payload); err == nil {
+            p.currentSessionID = payload.State.CurrentSessionID
+            p.messages = p.filterMessagesForSession(payload.State.Messages, p.currentSessionID)
+            if p.autoScroll {
+                p.scrollToBottom()
+            }
+            log.Printf("[MESSAGES] v%v State synchronized", event.Version)
+        }
+    }
+    return nil
 }
 
-func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (MessagesPanel, tea.Cmd) {
+// handleAnyEvent logs any received event for diagnostics
+func (p *MessagesPanel) handleAnyEvent(event state.StateEvent) error {
+    p.version = event.Version
+    log.Printf("[MESSAGES] v%v Received event type: %s from %s", event.Version, event.Type, event.SourcePanel)
+    return nil
+}
+
+// decodePayload converts a generic map payload into a concrete struct
+func decodePayload[T any](data map[string]interface{}, out *T) error {
+    b, err := json.Marshal(data)
+    if err != nil {
+        return fmt.Errorf("marshal payload: %w", err)
+    }
+    if err := json.Unmarshal(b, out); err != nil {
+        return fmt.Errorf("unmarshal payload: %w", err)
+    }
+    return nil
+}
+
+func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, tea.Cmd) {
 	switch event.Type {
 	case state.EventMessageAdded:
 		p.handleMessageAdded(event)
@@ -406,10 +450,10 @@ func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (MessagesPane
 	case state.EventStateSync:
 		p.handleStateSync(event)
 	}
-	return *p, nil
+    return p, nil
 }
 
-func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (MessagesPanel, tea.Cmd) {
+func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model, tea.Cmd) {
 	if msg.MessageID != "" {
 		// Update existing message with streaming content
 		for i, message := range p.messages {
@@ -420,7 +464,7 @@ func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (MessagesP
 			}
 		}
 	}
-	return *p, nil
+    return p, nil
 }
 
 // filterMessagesForSession filters messages for a specific session
@@ -447,7 +491,7 @@ func (p *MessagesPanel) scrollToBottom() {
 }
 
 // renderEmptyState renders the empty messages state
-func (p MessagesPanel) renderEmptyState() string {
+func (p *MessagesPanel) renderEmptyState() string {
 	t := theme.CurrentTheme()
 	style := styles.NewStyle().
 		Foreground(t.TextMuted()).
@@ -463,7 +507,7 @@ func (p MessagesPanel) renderEmptyState() string {
 }
 
 // renderMessages renders the list of messages
-func (p MessagesPanel) renderMessages() string {
+func (p *MessagesPanel) renderMessages() string {
 	t := theme.CurrentTheme()
 
 	var content string
@@ -523,7 +567,7 @@ func (p *MessagesPanel) calculateVisibleMessages() []types.MessageInfo {
 }
 
 // renderMessage renders a single message
-func (p MessagesPanel) renderMessage(message types.MessageInfo) string {
+func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 	t := theme.CurrentTheme()
 
 	var style styles.Style
@@ -568,7 +612,7 @@ func (p MessagesPanel) renderMessage(message types.MessageInfo) string {
 }
 
 // wordWrap wraps text to fit within specified width
-func (p MessagesPanel) wordWrap(text string, width int) string {
+func (p *MessagesPanel) wordWrap(text string, width int) string {
 	if width <= 0 {
 		return text
 	}
