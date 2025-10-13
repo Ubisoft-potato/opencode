@@ -234,7 +234,7 @@ func (c *SocketClient) RequestState() (*types.SharedApplicationState, error) {
 }
 
 // SendStateUpdateAndWait sends a state update and waits for a confirmation response.
-func (client *SocketClient) SendStateUpdateAndWait(update types.StateUpdate) error {
+func (client *SocketClient) SendStateUpdateAndWait(update types.StateUpdate) (int64, error) {
 	message := IPCMessage{
 		Type:      "state_update",
 		Data:      update,
@@ -243,26 +243,34 @@ func (client *SocketClient) SendStateUpdateAndWait(update types.StateUpdate) err
 
 	response, err := client.sendRequestAndWait(&message, 10*time.Second)
 	if err != nil {
-		return fmt.Errorf("failed to get state update response: %w", err)
+		return 0, fmt.Errorf("failed to get state update response: %w", err)
 	}
 
 	if response.Type != "state_update_response" {
-		return fmt.Errorf("unexpected response type: expected 'state_update_response', got '%s'", response.Type)
+		if response.Type == "state_update_error" {
+			if responseData, ok := response.Data.(map[string]interface{}); ok {
+				if errorMsg, ok := responseData["error"].(string); ok {
+					return 0, fmt.Errorf(errorMsg)
+				}
+			}
+		}
+		return 0, fmt.Errorf("unexpected response type: expected 'state_update_response', got '%s'", response.Type)
 	}
 
 	if responseData, ok := response.Data.(map[string]interface{}); ok {
 		if success, ok := responseData["success"].(bool); ok && success {
 			if version, ok := responseData["version"].(float64); ok {
-				client.setCurrentVersion(int64(version))
+				newVersion := int64(version)
+				client.setCurrentVersion(newVersion)
+				return newVersion, nil // Success
 			}
-			return nil // Success
 		}
 		if errorMsg, ok := responseData["error"].(string); ok {
-			return fmt.Errorf("state update failed on server: %s", errorMsg)
+			return 0, fmt.Errorf("state update failed on server: %s", errorMsg)
 		}
 	}
 
-	return fmt.Errorf("invalid state update response format")
+	return 0, fmt.Errorf("invalid state update response format")
 }
 
 // RegisterEventHandler registers a handler for specific event types
@@ -463,4 +471,11 @@ func (client *SocketClient) setCurrentVersion(version int64) {
 	client.versionMux.Lock()
 	defer client.versionMux.Unlock()
 	client.currentVersion = version
+}
+
+// GetCurrentVersion returns the current state version known to the client.
+func (client *SocketClient) GetCurrentVersion() int64 {
+	client.versionMux.RLock()
+	defer client.versionMux.RUnlock()
+	return client.currentVersion
 }

@@ -9,29 +9,29 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"encoding/json"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/ipc"
-	"github.com/sst/opencode/internal/state"
-	"github.com/sst/opencode/internal/types"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
+	"github.com/sst/opencode/internal/types"
 )
 
 // SessionsPanel manages the sessions list panel
 type SessionsPanel struct {
-	client       *opencode.Client
-	ipcClient    *ipc.SocketClient
-	syncManager  *state.PanelSyncManager
-	sessions     []types.SessionInfo
-	currentIndex int
+	client           *opencode.Client
+	ipcClient        *ipc.SocketClient
+	sessions         []types.SessionInfo
+	currentIndex     int
 	currentSessionID string
-	width        int
-	height       int
-	ctx          context.Context
-	cancel       context.CancelFunc
+	width            int
+	height           int
+	ctx              context.Context
+	cancel           context.CancelFunc
+	version          int64 // Store the state version directly in the model
 }
 
 // NewSessionsPanel creates a new sessions panel
@@ -39,26 +39,26 @@ func NewSessionsPanel(httpClient *opencode.Client, socketPath string) *SessionsP
 	ctx, cancel := context.WithCancel(context.Background())
 
 	panel := &SessionsPanel{
-		client:      httpClient,
-		ipcClient:   ipc.NewSocketClient(socketPath, "sessions-panel", "sessions"),
-		sessions:    make([]types.SessionInfo, 0),
+		client:       httpClient,
+		ipcClient:    ipc.NewSocketClient(socketPath, "sessions-panel", "sessions"),
+		sessions:     make([]types.SessionInfo, 0),
 		currentIndex: 0,
-		ctx:         ctx,
-		cancel:      cancel,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 
 	// Register event handlers
-	panel.ipcClient.RegisterEventHandler(state.EventSessionAdded, panel.handleSessionAdded)
-	panel.ipcClient.RegisterEventHandler(state.EventSessionDeleted, panel.handleSessionDeleted)
-	panel.ipcClient.RegisterEventHandler(state.EventSessionUpdated, panel.handleSessionUpdated)
-	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.handleSessionChanged)
-	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.handleStateSync)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionAdded, panel.handleSessionAdded)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionDeleted, panel.handleSessionDeleted)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionUpdated, panel.handleSessionUpdated)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionChanged, panel.handleSessionChanged)
+	panel.ipcClient.RegisterEventHandler(types.EventStateSync, panel.handleStateSync)
 
 	return panel
 }
 
 // Init initializes the panel
-func (p SessionsPanel) Init() tea.Cmd {
+func (p *SessionsPanel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
 	// Connect to IPC server
@@ -73,9 +73,10 @@ func (p SessionsPanel) Init() tea.Cmd {
 	cmds = append(cmds, func() tea.Msg {
 		time.Sleep(100 * time.Millisecond) // Wait for connection
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
+			log.Printf("[SESSIONS] ipcClient in Init: %+v", p.ipcClient)
 			return StateLoadedMsg{State: currentState}
-		}else{
-      log.Printf("Sessions panel initial state err:%v",err)
+		} else {
+			log.Printf("Sessions panel initial state err:%v", err)
 		}
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
@@ -84,7 +85,7 @@ func (p SessionsPanel) Init() tea.Cmd {
 }
 
 // Update handles messages and updates the panel state
-func (p SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		p.width = msg.Width
@@ -101,6 +102,8 @@ func (p SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StateLoadedMsg:
 		p.sessions = msg.State.Sessions
 		p.currentSessionID = msg.State.CurrentSessionID
+		p.version = msg.State.Version.Version // Explicitly store the version in the model state
+		log.Printf("[SESSIONS] Stored version %d in model state", p.version)
 		p.updateCurrentIndex()
 		return p, nil
 
@@ -117,7 +120,7 @@ func (p SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the sessions panel
-func (p SessionsPanel) View() string {
+func (p *SessionsPanel) View() string {
 	if len(p.sessions) == 0 {
 		return p.renderEmptyState()
 	}
@@ -126,7 +129,7 @@ func (p SessionsPanel) View() string {
 }
 
 // handleKeyPress processes keyboard input
-func (p SessionsPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (p *SessionsPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return p, tea.Quit
@@ -162,25 +165,31 @@ func (p SessionsPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // selectCurrentSession sends a session selection update
-func (p SessionsPanel) selectCurrentSession() tea.Cmd {
+func (p *SessionsPanel) selectCurrentSession() tea.Cmd {
 	if p.currentIndex >= 0 && p.currentIndex < len(p.sessions) {
 		session := p.sessions[p.currentIndex]
 		log.Printf("[SESSIONS] Selecting session: %s (index: %d)", session.ID, p.currentIndex)
 
 		return func() tea.Msg {
-			update := state.StateUpdate{
-				Type:        state.SessionChanged,
-				Payload:     state.SessionChangePayload{SessionID: session.ID},
-				SourcePanel: "sessions-panel",
-				Timestamp:   time.Now(),
+			versionToSend := p.version // Use version from model state
+			log.Printf("[SESSIONS] Sending update with ExpectedVersion: %d", versionToSend)
+
+			update := types.StateUpdate{
+				Type:            types.SessionChanged,
+				ExpectedVersion: versionToSend,
+				Payload:         types.SessionChangePayload{SessionID: session.ID},
+				SourcePanel:     "sessions-panel",
+				Timestamp:       time.Now(),
 			}
 
-			if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
+			if err != nil {
 				log.Printf("[SESSIONS] Failed to send SessionChanged event: %v", err)
 				return ErrorMsg{Error: err}
 			}
+			p.version = newVersion // IMPORTANT: Update model version from response
 
-			log.Printf("[SESSIONS] Successfully sent and acknowledged SessionChanged event")
+			log.Printf("[SESSIONS] Successfully sent. New version is %d", p.version)
 			return SessionSelectedMsg{SessionID: session.ID}
 		}
 	}
@@ -189,7 +198,7 @@ func (p SessionsPanel) selectCurrentSession() tea.Cmd {
 }
 
 // createNewSession creates a new session
-func (p SessionsPanel) createNewSession() tea.Cmd {
+func (p *SessionsPanel) createNewSession() tea.Cmd {
 	return func() tea.Msg {
 		// Create session via API
 		session, err := p.client.Session.New(p.ctx, opencode.SessionNewParams{})
@@ -207,23 +216,27 @@ func (p SessionsPanel) createNewSession() tea.Cmd {
 			IsActive:     true,
 		}
 
-		        // Send update
-		        update := state.StateUpdate{
-		            Type:        state.SessionAdded,
-		            Payload:     state.SessionAddPayload{Session: sessionInfo},
-		            SourcePanel: "sessions-panel",
-		            Timestamp:   time.Now(),
-		        }
-		
-		        if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {			return ErrorMsg{Error: err}
+		// Send update
+		update := types.StateUpdate{
+			Type:            types.SessionAdded,
+			ExpectedVersion: p.version,
+			Payload:         types.SessionAddPayload{Session: sessionInfo},
+			SourcePanel:     "sessions-panel",
+			Timestamp:       time.Now(),
 		}
+
+		newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
+		if err != nil {
+			return ErrorMsg{Error: err}
+		}
+		p.version = newVersion
 
 		return SessionCreatedMsg{Session: sessionInfo}
 	}
 }
 
 // deleteCurrentSession deletes the currently selected session
-func (p SessionsPanel) deleteCurrentSession() tea.Cmd {
+func (p *SessionsPanel) deleteCurrentSession() tea.Cmd {
 	if p.currentIndex >= 0 && p.currentIndex < len(p.sessions) {
 		sessionID := p.sessions[p.currentIndex].ID
 		return func() tea.Msg {
@@ -233,16 +246,19 @@ func (p SessionsPanel) deleteCurrentSession() tea.Cmd {
 			}
 
 			// Send update
-			update := state.StateUpdate{
-				Type:        state.SessionDeleted,
-				Payload:     state.SessionDeletePayload{SessionID: sessionID},
-				SourcePanel: "sessions-panel",
-				Timestamp:   time.Now(),
+			update := types.StateUpdate{
+				Type:            types.SessionDeleted,
+				ExpectedVersion: p.version,
+				Payload:         types.SessionDeletePayload{SessionID: sessionID},
+				SourcePanel:     "sessions-panel",
+				Timestamp:       time.Now(),
 			}
 
-			if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
+			if err != nil {
 				return ErrorMsg{Error: err}
 			}
+			p.version = newVersion
 
 			return SessionDeletedMsg{SessionID: sessionID}
 		}
@@ -251,7 +267,7 @@ func (p SessionsPanel) deleteCurrentSession() tea.Cmd {
 }
 
 // refreshSessions refreshes the sessions list from the API
-func (p SessionsPanel) refreshSessions() tea.Cmd {
+func (p *SessionsPanel) refreshSessions() tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := p.client.Session.List(p.ctx, opencode.SessionListParams{})
 		if err != nil {
@@ -277,81 +293,98 @@ func (p SessionsPanel) refreshSessions() tea.Cmd {
 
 // Event handlers
 
-func (p *SessionsPanel) handleSessionAdded(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.SessionAddPayload); ok {
-		p.sessions = append(p.sessions, payload.Session)
-		log.Printf("Session added: %s", payload.Session.ID)
-	}
-	return nil
-}
-
-func (p *SessionsPanel) handleSessionDeleted(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.SessionDeletePayload); ok {
-		for i, session := range p.sessions {
-			if session.ID == payload.SessionID {
-				p.sessions = append(p.sessions[:i], p.sessions[i+1:]...)
-				if p.currentIndex >= len(p.sessions) && len(p.sessions) > 0 {
-					p.currentIndex = len(p.sessions) - 1
-				}
-				break
-			}
+func (p *SessionsPanel) handleSessionAdded(event types.StateEvent) error {
+	if payload, ok := event.Data.(map[string]interface{}); ok {
+		var sessionAddPayload types.SessionAddPayload
+		if err := decodePayload(payload, &sessionAddPayload); err == nil {
+			p.sessions = append(p.sessions, sessionAddPayload.Session)
+			p.version = event.Version
+			log.Printf("Session added: %s, version updated to %d", sessionAddPayload.Session.ID, p.version)
 		}
-		log.Printf("Session deleted: %s", payload.SessionID)
 	}
 	return nil
 }
 
-func (p *SessionsPanel) handleSessionUpdated(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.SessionUpdatePayload); ok {
-		for i, session := range p.sessions {
-			if session.ID == payload.SessionID {
-				if payload.Title != "" {
-					p.sessions[i].Title = payload.Title
+func (p *SessionsPanel) handleSessionDeleted(event types.StateEvent) error {
+	if payload, ok := event.Data.(map[string]interface{}); ok {
+		var sessionDeletePayload types.SessionDeletePayload
+		if err := decodePayload(payload, &sessionDeletePayload); err == nil {
+			for i, session := range p.sessions {
+				if session.ID == sessionDeletePayload.SessionID {
+					p.sessions = append(p.sessions[:i], p.sessions[i+1:]...)
+					if p.currentIndex >= len(p.sessions) && len(p.sessions) > 0 {
+						p.currentIndex = len(p.sessions) - 1
+					}
+					break
 				}
-				p.sessions[i].IsActive = payload.IsActive
-				p.sessions[i].UpdatedAt = time.Now()
-				break
 			}
+			p.version = event.Version
+			log.Printf("Session deleted: %s, version updated to %d", sessionDeletePayload.SessionID, p.version)
 		}
-		log.Printf("Session updated: %s", payload.SessionID)
 	}
 	return nil
 }
 
-func (p *SessionsPanel) handleSessionChanged(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.SessionChangePayload); ok {
-		p.currentSessionID = payload.SessionID
-		p.updateCurrentIndex()
-		log.Printf("Session changed: %s", payload.SessionID)
+func (p *SessionsPanel) handleSessionUpdated(event types.StateEvent) error {
+	if payload, ok := event.Data.(map[string]interface{}); ok {
+		var sessionUpdatePayload types.SessionUpdatePayload
+		if err := decodePayload(payload, &sessionUpdatePayload); err == nil {
+			for i, session := range p.sessions {
+				if session.ID == sessionUpdatePayload.SessionID {
+					if sessionUpdatePayload.Title != "" {
+						p.sessions[i].Title = sessionUpdatePayload.Title
+					}
+					p.sessions[i].IsActive = sessionUpdatePayload.IsActive
+					p.sessions[i].UpdatedAt = time.Now()
+					break
+				}
+			}
+			p.version = event.Version
+			log.Printf("Session updated: %s, version updated to %d", sessionUpdatePayload.SessionID, p.version)
+		}
 	}
 	return nil
 }
 
-func (p *SessionsPanel) handleStateSync(event state.StateEvent) error {
+func (p *SessionsPanel) handleSessionChanged(event types.StateEvent) error {
+	if payload, ok := event.Data.(map[string]interface{}); ok {
+		var sessionChangePayload types.SessionChangePayload
+		if err := decodePayload(payload, &sessionChangePayload); err == nil {
+			p.currentSessionID = sessionChangePayload.SessionID
+			p.version = event.Version
+			p.updateCurrentIndex()
+			log.Printf("Session changed to %s, version updated to %d", sessionChangePayload.SessionID, p.version)
+		}
+	}
+	return nil
+}
+
+func (p *SessionsPanel) handleStateSync(event types.StateEvent) error {
 	if payload, ok := event.Data.(types.StateSyncPayload); ok {
 		p.sessions = payload.State.Sessions
 		p.currentSessionID = payload.State.CurrentSessionID
+		p.version = payload.State.Version.Version
 		p.updateCurrentIndex()
 		log.Printf("State synchronized")
 	}
 	return nil
 }
 
-func (p *SessionsPanel) handleSessionEvent(event state.StateEvent) (SessionsPanel, tea.Cmd) {
+func (p *SessionsPanel) handleSessionEvent(event types.StateEvent) (tea.Model, tea.Cmd) {
 	// Handle event processing here
 	switch event.Type {
-	case state.EventSessionAdded:
+	case types.EventSessionAdded:
 		p.handleSessionAdded(event)
-	case state.EventSessionDeleted:
+	case types.EventSessionDeleted:
 		p.handleSessionDeleted(event)
-	case state.EventSessionUpdated:
+	case types.EventSessionUpdated:
 		p.handleSessionUpdated(event)
-	case state.EventSessionChanged:
+	case types.EventSessionChanged:
 		p.handleSessionChanged(event)
-	case state.EventStateSync:
+	case types.EventStateSync:
 		p.handleStateSync(event)
 	}
-	return *p, nil
+	return p, nil
 }
 
 // updateCurrentIndex updates the current index based on current session ID
@@ -369,7 +402,7 @@ func (p *SessionsPanel) updateCurrentIndex() {
 }
 
 // renderEmptyState renders the empty sessions state
-func (p SessionsPanel) renderEmptyState() string {
+func (p *SessionsPanel) renderEmptyState() string {
 	t := theme.CurrentTheme()
 	style := styles.NewStyle().
 		Foreground(t.TextMuted()).
@@ -381,7 +414,7 @@ func (p SessionsPanel) renderEmptyState() string {
 }
 
 // renderSessionsList renders the list of sessions
-func (p SessionsPanel) renderSessionsList() string {
+func (p *SessionsPanel) renderSessionsList() string {
 	t := theme.CurrentTheme()
 
 	var content string
@@ -434,7 +467,7 @@ func (p SessionsPanel) renderSessionsList() string {
 type ConnectedMsg struct{}
 
 type StateLoadedMsg struct {
-	State *state.SharedApplicationState
+	State *types.SharedApplicationState
 }
 
 type ErrorMsg struct {
@@ -442,7 +475,7 @@ type ErrorMsg struct {
 }
 
 type SessionEventMsg struct {
-	Event state.StateEvent
+	Event types.StateEvent
 }
 
 type SessionSelectedMsg struct {
@@ -459,6 +492,18 @@ type SessionDeletedMsg struct {
 
 type SessionsRefreshedMsg struct {
 	Sessions []types.SessionInfo
+}
+
+// decodePayload is a helper to convert a map payload from JSON decoding back into a specific struct type.
+func decodePayload(data interface{}, target interface{}) error {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload map: %w", err)
+	}
+	if err := json.Unmarshal(bytes, target); err != nil {
+		return fmt.Errorf("failed to unmarshal payload into target struct: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -518,7 +563,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
-		<-sigChan
+		<-		sigChan
 		log.Printf("Received signal, shutting down sessions panel")
 		cancel()
 		program.Quit()

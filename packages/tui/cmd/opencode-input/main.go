@@ -527,7 +527,7 @@ func (p InputPanel) sendMessage() tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -590,7 +590,7 @@ func (p InputPanel) sendMessage() tea.Cmd {
 				Timestamp:   time.Now(),
 			}
 
-			if err := p.ipcClient.SendStateUpdateAndWait(assistantUpdate); err != nil {
+			if _, err := p.ipcClient.SendStateUpdateAndWait(assistantUpdate); err != nil {
 				log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
 			} else {
 				log.Printf("[INPUT] Successfully added assistant response to state")
@@ -701,7 +701,7 @@ func (p InputPanel) syncInputState() tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -722,7 +722,7 @@ func (p InputPanel) syncCursorPosition() tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -784,7 +784,7 @@ func (p InputPanel) createNewSession() tea.Cmd {
 		}
 
 		// Send the update via IPC
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			log.Printf("[INPUT] Failed to send session state update: %v", err)
 			return ErrorMsg{Error: err}
 		}
@@ -802,7 +802,7 @@ func (p InputPanel) switchToSession(sessionID string) tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -840,7 +840,7 @@ func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			log.Printf("[INPUT] Failed to send session delete state update: %v", err)
 			return ErrorMsg{Error: err}
 		}
@@ -858,7 +858,7 @@ func (p InputPanel) changeTheme(theme string) tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -875,7 +875,7 @@ func (p InputPanel) changeModel(provider, model string) tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -892,7 +892,7 @@ func (p InputPanel) changeAgent(agent string) tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
