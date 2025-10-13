@@ -351,7 +351,6 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 			return err
 		}
 		manager.state.AddSession(payload.Session)
-		manager.state.Version.Source = update.SourcePanel
 
 	case types.SessionChanged:
 		var payload types.SessionChangePayload
@@ -362,7 +361,6 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 			// Log warning instead of error if session does not exist yet
 			log.Printf("Warning: session %s not found during SessionChanged update", payload.SessionID)
 		}
-		manager.state.Version.Source = update.SourcePanel
 
 	case types.SessionDeleted:
 		var payload types.SessionDeletePayload
@@ -372,7 +370,6 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		if !manager.state.RemoveSession(payload.SessionID) {
 			return fmt.Errorf("session %s not found for deletion", payload.SessionID)
 		}
-		manager.state.Version.Source = update.SourcePanel
 
 	case types.InputUpdated:
 		var payload types.InputUpdatePayload
@@ -386,9 +383,6 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		if payload.Mode != "" {
 			manager.state.Input.Mode = payload.Mode
 		}
-		manager.state.Version.Version++
-		manager.state.Version.Timestamp = time.Now()
-		manager.state.Version.Source = update.SourcePanel
 
 	case types.CursorMoved:
 		var payload types.CursorMovePayload
@@ -398,9 +392,6 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		manager.state.Input.CursorPosition = payload.Position
 		manager.state.Input.SelectionStart = payload.SelectionStart
 		manager.state.Input.SelectionEnd = payload.SelectionEnd
-		manager.state.Version.Version++
-		manager.state.Version.Timestamp = time.Now()
-		manager.state.Version.Source = update.SourcePanel
 
 	case types.ThemeChanged:
 		var payload types.ThemeChangePayload
@@ -408,21 +399,25 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 			return err
 		}
 		manager.state.Theme = payload.Theme
-		manager.state.Version.Version++
-		manager.state.Version.Timestamp = time.Now()
-		manager.state.Version.Source = update.SourcePanel
 
 	default:
 		log.Printf("Warning: unhandled update type in UpdateWithVersionCheck: %s. Bumping version only.", update.Type)
-		manager.state.Version.Version++
-		manager.state.Version.Timestamp = time.Now()
-		manager.state.Version.Source = update.SourcePanel
-		manager.state.LastUpdate = time.Now()
-		manager.state.UpdateCount++
 	}
+
+	// Increment version and update timestamps for any successful change
+	manager.state.Version.Version++
+	manager.state.Version.Timestamp = time.Now()
+	manager.state.Version.Source = update.SourcePanel
+	manager.state.LastUpdate = time.Now()
+	manager.state.UpdateCount++
+
+	// Create and broadcast event
+	event := CreateEventFromUpdate(update, manager.state.Version.Version)
+	manager.eventBus.Broadcast(event)
 
 	return nil
 }
+
 
 // GetState returns a copy of the current state
 func (manager *PanelSyncManager) GetState() *types.SharedApplicationState {
