@@ -40,6 +40,7 @@ type InputPanel struct {
 	isMultiline      bool
 	showHelp         bool
 	lastCommand      string
+	version          int64
 }
 
 // NewInputPanel creates a new input panel
@@ -72,7 +73,7 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 }
 
 // Init initializes the panel
-func (p InputPanel) Init() tea.Cmd {
+func (p *InputPanel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
 	// Connect to IPC server with retry
@@ -118,7 +119,7 @@ func (p InputPanel) Init() tea.Cmd {
 }
 
 // Update handles messages and updates the panel state
-func (p InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		p.width = msg.Width
@@ -134,7 +135,7 @@ func (p InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StateLoadedMsg:
 		if msg.State != nil {
-			log.Printf("[INPUT] Loading state from IPC server")
+			log.Printf("[INPUT] Loading state from IPC server, version %d", msg.State.Version.Version)
 			p.currentSessionID = msg.State.CurrentSessionID
 			p.buffer = msg.State.Input.Buffer
 			p.cursorPosition = msg.State.Input.CursorPosition
@@ -143,6 +144,7 @@ func (p InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.mode = msg.State.Input.Mode
 			p.history = msg.State.Input.History
 			p.historyIndex = msg.State.Input.HistoryIndex
+			p.version = msg.State.Version.Version
 		} else {
 			log.Printf("[INPUT] No state available, using defaults")
 			// Initialize with default values
@@ -178,12 +180,12 @@ func (p InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the input panel
-func (p InputPanel) View() string {
+func (p *InputPanel) View() string {
 	return p.renderInput()
 }
 
 // handleKeyPress processes keyboard input
-func (p InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		if p.buffer == "" {
@@ -298,7 +300,7 @@ func (p InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleEnter processes the enter key
-func (p InputPanel) handleEnter() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleEnter() (tea.Model, tea.Cmd) {
 	if p.isMultiline {
 		// In multiline mode, enter adds a newline
 		return p.insertCharacter("\n")
@@ -319,7 +321,7 @@ func (p InputPanel) handleEnter() (tea.Model, tea.Cmd) {
 }
 
 // handleTab processes tab completion
-func (p InputPanel) handleTab() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleTab() (tea.Model, tea.Cmd) {
 	// Simple tab completion for commands
 	if strings.HasPrefix(p.buffer, "/") {
 		commands := []string{"/help", "/clear", "/session", "/new", "/delete", "/theme", "/model", "/agent"}
@@ -338,7 +340,7 @@ func (p InputPanel) handleTab() (tea.Model, tea.Cmd) {
 }
 
 // handleShiftTab processes shift+tab
-func (p InputPanel) handleShiftTab() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleShiftTab() (tea.Model, tea.Cmd) {
 	// Remove indentation
 	if strings.HasPrefix(p.buffer[max(0, p.cursorPosition-4):p.cursorPosition], "    ") {
 		start := max(0, p.cursorPosition-4)
@@ -350,7 +352,7 @@ func (p InputPanel) handleShiftTab() (tea.Model, tea.Cmd) {
 }
 
 // handleArrowUp handles up arrow (history navigation)
-func (p InputPanel) handleArrowUp() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleArrowUp() (tea.Model, tea.Cmd) {
 	if len(p.history) > 0 && p.historyIndex < len(p.history)-1 {
 		p.historyIndex++
 		p.buffer = p.history[len(p.history)-1-p.historyIndex]
@@ -361,7 +363,7 @@ func (p InputPanel) handleArrowUp() (tea.Model, tea.Cmd) {
 }
 
 // handleArrowDown handles down arrow (history navigation)
-func (p InputPanel) handleArrowDown() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleArrowDown() (tea.Model, tea.Cmd) {
 	if p.historyIndex > 0 {
 		p.historyIndex--
 		p.buffer = p.history[len(p.history)-1-p.historyIndex]
@@ -377,7 +379,7 @@ func (p InputPanel) handleArrowDown() (tea.Model, tea.Cmd) {
 }
 
 // handleArrowLeft handles left arrow
-func (p InputPanel) handleArrowLeft() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleArrowLeft() (tea.Model, tea.Cmd) {
 	if p.cursorPosition > 0 {
 		p.cursorPosition--
 		return p, p.syncCursorPosition()
@@ -386,7 +388,7 @@ func (p InputPanel) handleArrowLeft() (tea.Model, tea.Cmd) {
 }
 
 // handleArrowRight handles right arrow
-func (p InputPanel) handleArrowRight() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleArrowRight() (tea.Model, tea.Cmd) {
 	if p.cursorPosition < len(p.buffer) {
 		p.cursorPosition++
 		return p, p.syncCursorPosition()
@@ -395,7 +397,7 @@ func (p InputPanel) handleArrowRight() (tea.Model, tea.Cmd) {
 }
 
 // handleBackspace handles backspace
-func (p InputPanel) handleBackspace() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleBackspace() (tea.Model, tea.Cmd) {
 	if p.cursorPosition > 0 {
 		p.buffer = p.buffer[:p.cursorPosition-1] + p.buffer[p.cursorPosition:]
 		p.cursorPosition--
@@ -405,7 +407,7 @@ func (p InputPanel) handleBackspace() (tea.Model, tea.Cmd) {
 }
 
 // handleDelete handles delete key
-func (p InputPanel) handleDelete() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleDelete() (tea.Model, tea.Cmd) {
 	if p.cursorPosition < len(p.buffer) {
 		p.buffer = p.buffer[:p.cursorPosition] + p.buffer[p.cursorPosition+1:]
 		return p, p.syncInputState()
@@ -414,14 +416,14 @@ func (p InputPanel) handleDelete() (tea.Model, tea.Cmd) {
 }
 
 // insertCharacter inserts a character at the cursor position
-func (p InputPanel) insertCharacter(char string) (tea.Model, tea.Cmd) {
+func (p *InputPanel) insertCharacter(char string) (tea.Model, tea.Cmd) {
 	p.buffer = p.buffer[:p.cursorPosition] + char + p.buffer[p.cursorPosition:]
 	p.cursorPosition += len(char)
 	return p, p.syncInputState()
 }
 
 // deletePreviousWord deletes the previous word
-func (p InputPanel) deletePreviousWord() (tea.Model, tea.Cmd) {
+func (p *InputPanel) deletePreviousWord() (tea.Model, tea.Cmd) {
 	if p.cursorPosition == 0 {
 		return p, nil
 	}
@@ -444,7 +446,7 @@ func (p InputPanel) deletePreviousWord() (tea.Model, tea.Cmd) {
 }
 
 // handleCommand processes command input
-func (p InputPanel) handleCommand() (tea.Model, tea.Cmd) {
+func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	command := strings.TrimSpace(p.buffer)
 	parts := strings.Fields(command)
 
@@ -493,7 +495,7 @@ func (p InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 }
 
 // sendMessage sends the current buffer as a message
-func (p InputPanel) sendMessage() tea.Cmd {
+func (p *InputPanel) sendMessage() tea.Cmd {
 	if p.currentSessionID == "" {
 		return func() tea.Msg {
 			return ErrorMsg{Error: fmt.Errorf("no session selected")}
@@ -521,14 +523,17 @@ func (p InputPanel) sendMessage() tea.Cmd {
 
 		// Send state update
 		update := types.StateUpdate{
-			Type:        types.MessageAdded,
-			Payload:     types.MessageAddPayload{Message: messageInfo},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            types.MessageAdded,
+			Payload:         types.MessageAddPayload{Message: messageInfo},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		// Send to OpenCode API
@@ -584,15 +589,17 @@ func (p InputPanel) sendMessage() tea.Cmd {
 
 			// Send assistant message state update
 			assistantUpdate := types.StateUpdate{
-				Type:        types.MessageAdded,
-				Payload:     types.MessageAddPayload{Message: assistantMessage},
-				SourcePanel: "input-panel",
-				Timestamp:   time.Now(),
+				Type:            types.MessageAdded,
+				Payload:         types.MessageAddPayload{Message: assistantMessage},
+				SourcePanel:     "input-panel",
+				Timestamp:       time.Now(),
+				ExpectedVersion: p.version,
 			}
 
-			if _, err := p.ipcClient.SendStateUpdateAndWait(assistantUpdate); err != nil {
+			if newVersion, err := p.ipcClient.SendStateUpdateAndWait(assistantUpdate); err != nil {
 				log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
 			} else {
+				p.version = newVersion
 				log.Printf("[INPUT] Successfully added assistant response to state")
 			}
 		}
@@ -650,28 +657,29 @@ func (p *InputPanel) handleCursorMoved(event types.StateEvent) error {
 
 func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
 	if payload, ok := event.Data.(types.SessionChangePayload); ok {
-			p.currentSessionID = payload.SessionID
-			log.Printf("Session changed: %s", payload.SessionID)
+		p.currentSessionID = payload.SessionID
+		log.Printf("Session changed: %s", payload.SessionID)
 	}
 	return nil
 }
 
 func (p *InputPanel) handleStateSync(event types.StateEvent) error {
 	if payload, ok := event.Data.(types.StateSyncPayload); ok {
-			p.currentSessionID = payload.State.CurrentSessionID
-			p.buffer = payload.State.Input.Buffer
-			p.cursorPosition = payload.State.Input.CursorPosition
-			p.selectionStart = payload.State.Input.SelectionStart
-			p.selectionEnd = payload.State.Input.SelectionEnd
-			p.mode = payload.State.Input.Mode
-			p.history = payload.State.Input.History
-			p.historyIndex = payload.State.Input.HistoryIndex
-			log.Printf("State synchronized")
+		p.currentSessionID = payload.State.CurrentSessionID
+		p.buffer = payload.State.Input.Buffer
+		p.cursorPosition = payload.State.Input.CursorPosition
+		p.selectionStart = payload.State.Input.SelectionStart
+		p.selectionEnd = payload.State.Input.SelectionEnd
+		p.mode = payload.State.Input.Mode
+		p.history = payload.State.Input.History
+		p.historyIndex = payload.State.Input.HistoryIndex
+		p.version = payload.State.Version.Version
+		log.Printf("State synchronized, version set to %d", p.version)
 	}
 	return nil
 }
 
-func (p *InputPanel) handleInputEvent(event types.StateEvent) (InputPanel, tea.Cmd) {
+func (p *InputPanel) handleInputEvent(event types.StateEvent) (tea.Model, tea.Cmd) {
 	switch event.Type {
 	case types.EventInputUpdated:
 		p.handleInputUpdated(event)
@@ -682,11 +690,11 @@ func (p *InputPanel) handleInputEvent(event types.StateEvent) (InputPanel, tea.C
 	case types.EventStateSync:
 		p.handleStateSync(event)
 	}
-	return *p, nil
+	return p, nil
 }
 // Sync methods
 
-func (p InputPanel) syncInputState() tea.Cmd {
+func (p *InputPanel) syncInputState() tea.Cmd {
 	return func() tea.Msg {
 		update := types.StateUpdate{
 			Type: types.InputUpdated,
@@ -697,19 +705,22 @@ func (p InputPanel) syncInputState() tea.Cmd {
 				SelectionEnd:   p.selectionEnd,
 				Mode:           p.mode,
 			},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return nil
 	}
 }
 
-func (p InputPanel) syncCursorPosition() tea.Cmd {
+func (p *InputPanel) syncCursorPosition() tea.Cmd {
 	return func() tea.Msg {
 		update := types.StateUpdate{
 			Type: types.CursorMoved,
@@ -718,12 +729,15 @@ func (p InputPanel) syncCursorPosition() tea.Cmd {
 				SelectionStart: p.selectionStart,
 				SelectionEnd:   p.selectionEnd,
 			},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return nil
@@ -732,20 +746,20 @@ func (p InputPanel) syncCursorPosition() tea.Cmd {
 
 // Command implementations
 
-func (p InputPanel) showHelpMessage() tea.Cmd {
+func (p *InputPanel) showHelpMessage() tea.Cmd {
 	return func() tea.Msg {
 		return InfoMsg{Message: "Commands: /help /clear /new /session <id> /delete <id> /theme <name> /model <provider> <model> /agent <name>"}
 	}
 }
 
-func (p InputPanel) clearMessages() tea.Cmd {
+func (p *InputPanel) clearMessages() tea.Cmd {
 	// This would clear messages in the current session
 	return func() tea.Msg {
 		return InfoMsg{Message: "Messages cleared"}
 	}
 }
 
-func (p InputPanel) createNewSession() tea.Cmd {
+func (p *InputPanel) createNewSession() tea.Cmd {
 	return func() tea.Msg {
 		// Generate a default title with timestamp
 		title := fmt.Sprintf("New Session %s", time.Now().Format("15:04:05"))
@@ -779,38 +793,44 @@ func (p InputPanel) createNewSession() tea.Cmd {
 					IsActive:     true,
 				},
 			},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
 		// Send the update via IPC
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			log.Printf("[INPUT] Failed to send session state update: %v", err)
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
 	}
 }
 
-func (p InputPanel) switchToSession(sessionID string) tea.Cmd {
+func (p *InputPanel) switchToSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		update := types.StateUpdate{
-			Type:        types.SessionChanged,
-			Payload:     types.SessionChangePayload{SessionID: sessionID},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            types.SessionChanged,
+			Payload:         types.SessionChangePayload{SessionID: sessionID},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
 	}
 }
 
-func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
+func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		// Delete session on OpenCode server first
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -834,66 +854,78 @@ func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
 
 		// Now update local state
 		update := types.StateUpdate{
-			Type:        types.SessionDeleted,
-			Payload:     types.SessionDeletePayload{SessionID: sessionID},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            types.SessionDeleted,
+			Payload:         types.SessionDeletePayload{SessionID: sessionID},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			log.Printf("[INPUT] Failed to send session delete state update: %v", err)
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
 	}
 }
 
-func (p InputPanel) changeTheme(theme string) tea.Cmd {
+func (p *InputPanel) changeTheme(theme string) tea.Cmd {
 	return func() tea.Msg {
 		update := types.StateUpdate{
-			Type:        types.ThemeChanged,
-			Payload:     types.ThemeChangePayload{Theme: theme},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            types.ThemeChanged,
+			Payload:         types.ThemeChangePayload{Theme: theme},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Theme changed to %s", theme)}
 	}
 }
 
-func (p InputPanel) changeModel(provider, model string) tea.Cmd {
+func (p *InputPanel) changeModel(provider, model string) tea.Cmd {
 	return func() tea.Msg {
 		update := types.StateUpdate{
-			Type:        types.ModelChanged,
-			Payload:     types.ModelChangePayload{Provider: provider, Model: model},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            types.ModelChanged,
+			Payload:         types.ModelChangePayload{Provider: provider, Model: model},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Model changed to %s/%s", provider, model)}
 	}
 }
 
-func (p InputPanel) changeAgent(agent string) tea.Cmd {
+func (p *InputPanel) changeAgent(agent string) tea.Cmd {
 	return func() tea.Msg {
 		update := types.StateUpdate{
-			Type:        types.AgentChanged,
-			Payload:     types.AgentChangePayload{Agent: agent},
-			SourcePanel: "input-panel",
-			Timestamp:   time.Now(),
+			Type:            types.AgentChanged,
+			Payload:         types.AgentChangePayload{Agent: agent},
+			SourcePanel:     "input-panel",
+			Timestamp:       time.Now(),
+			ExpectedVersion: p.version,
 		}
 
-		if _, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
+		if newVersion, err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
 		}
 
 		return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
@@ -901,7 +933,7 @@ func (p InputPanel) changeAgent(agent string) tea.Cmd {
 }
 
 // renderInput renders the input panel
-func (p InputPanel) renderInput() string {
+func (p *InputPanel) renderInput() string {
 	t := theme.CurrentTheme()
 
 	var content string
@@ -962,7 +994,7 @@ func (p InputPanel) renderInput() string {
 }
 
 // renderHelp renders the help text
-func (p InputPanel) renderHelp() string {
+func (p *InputPanel) renderHelp() string {
 	t := theme.CurrentTheme()
 
 	helpContent := `
@@ -1074,7 +1106,7 @@ func main() {
 	panel := NewInputPanel(httpClient, socketPath)
 
 	program := tea.NewProgram(
-		*panel,
+		panel,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
