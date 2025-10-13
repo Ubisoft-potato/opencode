@@ -16,37 +16,6 @@ import (
 	"github.com/sst/opencode/internal/types"
 )
 
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// getFreshEncoder creates a new JSON encoder directly on the connection
-// This ensures we always write to the correct connection and avoid encoder/connection mismatches
-func getFreshEncoder(clientConn *ClientConnection) *json.Encoder {
-	// Verify connection is valid before creating encoder
-	if clientConn.Conn == nil {
-		log.Printf("[SERVER] ERROR: Connection is nil when creating fresh encoder")
-		return nil
-	}
-
-	// Test connection health with a minimal operation
-	if remoteAddr := clientConn.Conn.RemoteAddr(); remoteAddr != nil {
-		log.Printf("[SERVER] Connection remote address: %s", remoteAddr.String())
-	}
-
-	if localAddr := clientConn.Conn.LocalAddr(); localAddr != nil {
-		log.Printf("[SERVER] Connection local address: %s", localAddr.String())
-	}
-
-	freshEncoder := json.NewEncoder(clientConn.Conn)
-	log.Printf("[SERVER] Created fresh encoder %p for verified connection %p", freshEncoder, clientConn.Conn)
-	return freshEncoder
-}
-
 // SocketServer manages Unix Domain Socket server for inter-panel communication
 type SocketServer struct {
 	socketPath      string
@@ -55,23 +24,40 @@ type SocketServer struct {
 	connectionsMux  sync.RWMutex
 	eventBus        interfaces.EventBus
 	stateManager    interfaces.StateManager
-	ctx            context.Context
-	cancel         context.CancelFunc
-	isRunning      bool
-	runningMux     sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	isRunning       bool
+	runningMux      sync.RWMutex
 }
 
 // ClientConnection represents a connected panel client
 type ClientConnection struct {
-	ID          string    `json:"id"`
-	PanelType   string    `json:"panel_type"`
-	PanelID     string    `json:"panel_id"`
-	Conn        net.Conn  `json:"-"`
-	ConnectedAt time.Time `json:"connected_at"`
-	LastSeen    time.Time `json:"last_seen"`
-	MessageCount int64    `json:"message_count"`
-	encoder     *json.Encoder `json:"-"`
-	decoder     *json.Decoder `json:"-"`
+	ID           string        `json:"id"`
+	PanelType    string        `json:"panel_type"`
+	PanelID      string        `json:"panel_id"`
+	Conn         net.Conn      `json:"-"`
+	ConnectedAt  time.Time     `json:"connected_at"`
+	LastSeen     time.Time     `json:"last_seen"`
+	MessageCount int64         `json:"message_count"`
+	encoder      *json.Encoder `json:"-"`
+	decoder      *json.Decoder `json:"-"`
+	sendMutex    sync.Mutex    // To synchronize writes to the connection
+}
+
+// send safely writes a message to the client connection.
+func (cc *ClientConnection) send(message IPCMessage) error {
+	cc.sendMutex.Lock()
+	defer cc.sendMutex.Unlock()
+
+	if cc.Conn == nil {
+		return fmt.Errorf("cannot send message to nil connection for panel %s", cc.PanelID)
+	}
+
+	// Set a write deadline to prevent indefinite blocking.
+	cc.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer cc.Conn.SetWriteDeadline(time.Time{})
+
+	return cc.encoder.Encode(message)
 }
 
 // NewSocketServer creates a new Unix Domain Socket server
@@ -79,12 +65,12 @@ func NewSocketServer(socketPath string, eventBus interfaces.EventBus, stateManag
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &SocketServer{
-		socketPath:  socketPath,
-		connections: make(map[string]*ClientConnection),
-		eventBus:    eventBus,
+		socketPath:   socketPath,
+		connections:  make(map[string]*ClientConnection),
+		eventBus:     eventBus,
 		stateManager: stateManager,
-		ctx:        ctx,
-		cancel:     cancel,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -121,9 +107,6 @@ func (server *SocketServer) Start() error {
 
 	// Start accepting connections in a separate goroutine
 	go server.acceptConnections()
-
-	// Start connection management goroutine
-	go server.manageConnections()
 
 	return nil
 }
@@ -172,18 +155,17 @@ func (server *SocketServer) acceptConnections() {
 			return
 		default:
 			// Set a timeout for Accept to allow periodic context checking
-			if tcpListener, ok := server.listener.(*net.UnixListener); ok {
-				tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			if unixListener, ok := server.listener.(*net.UnixListener); ok {
+				unixListener.SetDeadline(time.Now().Add(1 * time.Second))
 			}
 
 			conn, err := server.listener.Accept()
 			if err != nil {
-				// Check if it's a timeout or context cancellation
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
+					continue // This is expected, just loop again
 				}
 				if server.ctx.Err() != nil {
-					return
+					return // Server is stopping
 				}
 				log.Printf("Error accepting connection: %v", err)
 				continue
@@ -200,12 +182,10 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	// Set initial deadline for handshake
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
-
-	log.Printf("[SERVER] Created encoder %p for connection %p in handleConnection", encoder, conn)
 
 	// Wait for handshake message
 	var handshake HandshakeMessage
@@ -217,17 +197,13 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 	// Validate handshake
 	if handshake.Type != "handshake" || handshake.PanelID == "" || handshake.PanelType == "" {
 		log.Printf("Invalid handshake: %+v", handshake)
-		// Note: Cannot use sendError here as clientConn not yet created
-		response := IPCMessage{
-			Type: "error",
-			Data: map[string]interface{}{"error": "invalid handshake"},
-			Timestamp: time.Now(),
-		}
-		encoder.Encode(response)
+		// Note: Cannot use the safe send method here as clientConn is not yet created
+		// and this is a raw response, not an IPCMessage.
+		encoder.Encode(HandshakeResponse{Success: false, Error: "Invalid handshake"})
 		return
 	}
 
-	// Create client connection
+	// Create client connection object
 	clientConn := &ClientConnection{
 		ID:          fmt.Sprintf("%s-%d", handshake.PanelID, time.Now().UnixNano()),
 		PanelType:   handshake.PanelType,
@@ -239,17 +215,14 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 		decoder:     decoder,
 	}
 
-	log.Printf("[SERVER] Stored encoder %p and connection %p in ClientConnection %s", clientConn.encoder, clientConn.Conn, clientConn.ID)
-
-	// Send handshake response
-	response := HandshakeResponse{
+	// Send handshake response (raw, not wrapped in IPCMessage)
+	handshakeResponse := HandshakeResponse{
 		Type:         "handshake_response",
 		Success:      true,
 		ConnectionID: clientConn.ID,
 		ServerTime:   time.Now(),
 	}
-
-	if err := encoder.Encode(response); err != nil {
+	if err := encoder.Encode(handshakeResponse); err != nil {
 		log.Printf("Failed to send handshake response: %v", err)
 		return
 	}
@@ -258,7 +231,6 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 	server.connectionsMux.Lock()
 	server.connections[clientConn.ID] = clientConn
 	server.connectionsMux.Unlock()
-
 	log.Printf("Panel %s (%s) connected with ID %s", clientConn.PanelID, clientConn.PanelType, clientConn.ID)
 
 	// Subscribe to event bus
@@ -271,7 +243,7 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 	// Remove read deadline for normal operation
 	conn.SetReadDeadline(time.Time{})
 
-	// Handle messages from this client
+	// Handle messages from this client in a blocking loop
 	server.handleClientMessages(clientConn)
 
 	// Cleanup on disconnect
@@ -280,7 +252,6 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 	server.connectionsMux.Unlock()
 
 	server.eventBus.Unsubscribe(clientConn.PanelID)
-
 	log.Printf("Panel %s (%s) disconnected", clientConn.PanelID, clientConn.PanelType)
 }
 
@@ -292,24 +263,26 @@ func (server *SocketServer) handleClientMessages(clientConn *ClientConnection) {
 			return
 		default:
 			// Set a read timeout to allow periodic context checking
-			clientConn.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			clientConn.Conn.SetReadDeadline(time.Now().Add(15 * time.Second)) // Increased timeout
 
 			var message IPCMessage
 			err := clientConn.decoder.Decode(&message)
 			if err != nil {
-				// Check if it's a timeout
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// This is an expected timeout when client is idle, not an error.
+					// We can add a verbose log here if needed for debugging.
+					// log.Printf("[SERVER] Read timeout for client %s. Looping.", clientConn.ID)
 					continue
 				}
 				log.Printf("Error reading from client %s: %v", clientConn.ID, err)
-				return
+				return // Real error or EOF, close connection
 			}
 
 			clientConn.LastSeen = time.Now()
 			clientConn.MessageCount++
 
-			// Process the message
-			server.processClientMessage(clientConn, message)
+			// Process the message in a new goroutine to avoid blocking the read loop
+			go server.processClientMessage(clientConn, message)
 		}
 	}
 }
@@ -317,8 +290,6 @@ func (server *SocketServer) handleClientMessages(clientConn *ClientConnection) {
 // processClientMessage handles a message from a client
 func (server *SocketServer) processClientMessage(clientConn *ClientConnection, message IPCMessage) {
 	log.Printf("[SERVER] Received message of type '%s' from client %s (%s)", message.Type, clientConn.PanelID, clientConn.ID)
-	marshal,_ := json.Marshal(message)
-	log.Printf("[SERVER] Received message of type '%s' data '%v'", message.Type,string(marshal))
 	switch message.Type {
 	case "state_update":
 		server.handleStateUpdate(clientConn, message)
@@ -341,268 +312,112 @@ func (server *SocketServer) handleStateUpdate(clientConn *ClientConnection, mess
 		return
 	}
 
-	// Set source panel
 	update.SourcePanel = clientConn.PanelID
 
-	// Apply the update
 	err := server.stateManager.UpdateWithVersionCheck(update)
 	if err != nil {
 		log.Printf("Failed to apply state update: %v", err)
-		server.sendErrorMessage(clientConn, "state_update_error", err.Error())
+		server.sendErrorMessage(clientConn, "state_update_error", err.Error(), message.RequestID)
 		return
 	}
 
-	// Create and broadcast event
 	event := state.CreateEventFromUpdate(update, server.stateManager.GetState().GetCurrentVersion())
 	server.eventBus.Broadcast(event)
 
-	// Send success response using fresh encoder
 	response := IPCMessage{
 		Type:      "state_update_response",
-		RequestID: message.RequestID, // Echo the request ID
+		RequestID: message.RequestID,
 		Data: map[string]interface{}{
 			"success": true,
 			"version": server.stateManager.GetState().GetCurrentVersion(),
 		},
 		Timestamp: time.Now(),
 	}
-	freshEncoder := getFreshEncoder(clientConn)
-	freshEncoder.Encode(response)
+	if err := clientConn.send(response); err != nil {
+		log.Printf("Failed to send state update success response: %v", err)
+	}
 }
 
 // handleStateRequest processes a state request from a client
 func (server *SocketServer) handleStateRequest(clientConn *ClientConnection, message IPCMessage) {
-	log.Printf("[SERVER] Received state request from client %s", clientConn.ID)
-
-	// Get current state
 	currentState := server.stateManager.GetState()
 	if currentState == nil {
-		log.Printf("[SERVER] ERROR: StateManager returned nil state")
 		server.sendError(clientConn, "state not available")
 		return
 	}
 
-	log.Printf("[SERVER] State retrieved successfully, version: %d", currentState.Version.Version)
-
-	// Clone state
-	clonedState := currentState.Clone()
-	if clonedState == nil {
-		log.Printf("[SERVER] ERROR: State Clone() returned nil")
-		server.sendError(clientConn, "failed to clone state")
-		return
+	response := IPCMessage{
+		Type:      "state_response",
+		RequestID: message.RequestID,
+		Data:      currentState.Clone(),
+		Timestamp: time.Now(),
 	}
-
-	log.Printf("[SERVER] State cloned successfully, sending response...")
-
-	// Debug: Print cloned state details
-	log.Printf("[SERVER] About to send state with %d sessions, theme: %s, sessionID: %s",
-		len(clonedState.Sessions), clonedState.Theme, clonedState.CurrentSessionID)
-	log.Printf("[SERVER] State version: %d, updateCount: %d",
-		clonedState.Version.Version, clonedState.UpdateCount)
-
-	// Send current state
-		response := IPCMessage{
-			Type:      "state_response",
-			RequestID: message.RequestID, // Echo the request ID
-			Data:      clonedState,
-			Timestamp: time.Now(),
-		}
-
-	// Debug: Manual JSON serialization check
-	if jsonData, err := json.MarshalIndent(response, "", "  "); err == nil {
-		log.Printf("[SERVER] JSON response content:\n%s", string(jsonData))
-		log.Printf("[SERVER] JSON length: %d bytes", len(jsonData))
-	} else {
-		log.Printf("[SERVER] ERROR: Failed to marshal response for debugging: %v", err)
-
-		// --- BEGIN STATE DUMP (Serialization Failed) ---
-		log.Printf("[SERVER] --- BEGIN STATE DUMP (Serialization Failed) ---")
-		log.Printf("[SERVER] State Version: %+v", clonedState.Version)
-		log.Printf("[SERVER] CurrentSessionID: %s", clonedState.CurrentSessionID)
-		log.Printf("[SERVER] Theme: %s", clonedState.Theme)
-		log.Printf("[SERVER] UpdateCount: %d", clonedState.UpdateCount)
-		log.Printf("[SERVER] Session Count: %d", len(clonedState.Sessions))
-		for i, s := range clonedState.Sessions {
-			log.Printf("[SERVER]   Session[%d]: ID=%s, Title=%s, CreatedAt=%v, UpdatedAt=%v", i, s.ID, s.Title, s.CreatedAt, s.UpdatedAt)
-		}
-		log.Printf("[SERVER] --- END STATE DUMP ---")
-		// --- END NEW DEBUG LOGIC ---
-
-		server.sendError(clientConn, "failed to serialize response")
-		return
-	}
-
-	// Send the actual response
-	log.Printf("[SERVER] Attempting to encode and send response...")
-	log.Printf("[SERVER] DEBUG: Code reached after 'Attempting to encode'")
-
-	// Set write deadline to prevent hanging
-	writeDeadline := time.Now().Add(10 * time.Second)
-	if err := clientConn.Conn.SetWriteDeadline(writeDeadline); err != nil {
-		log.Printf("[SERVER] Warning: Failed to set write deadline: %v", err)
-	}
-
-	// Comprehensive connection validation
-	if clientConn.Conn == nil {
-		log.Printf("[SERVER] ERROR: Connection is nil")
-		return
-	}
-
-	// Test connection health with a short read timeout
-	testDeadline := time.Now().Add(1 * time.Millisecond)
-	clientConn.Conn.SetReadDeadline(testDeadline)
-
-	// Try to read 0 bytes to test connection health
-	testBuffer := make([]byte, 0)
-	_, readErr := clientConn.Conn.Read(testBuffer)
-	clientConn.Conn.SetReadDeadline(time.Time{}) // Clear test deadline
-
-	if readErr != nil {
-		if netErr, ok := readErr.(net.Error); ok && !netErr.Timeout() {
-			log.Printf("[SERVER] WARNING: Connection health test failed: %v", readErr)
-		}
-	} else {
-		log.Printf("[SERVER] Connection health test passed")
-	}
-
-	// Verify connection addresses
-	if remoteAddr := clientConn.Conn.RemoteAddr(); remoteAddr != nil {
-		log.Printf("[SERVER] Remote address: %s", remoteAddr.String())
-	} else {
-		log.Printf("[SERVER] Remote address: <nil> (normal for Unix sockets)")
-	}
-
-	if localAddr := clientConn.Conn.LocalAddr(); localAddr != nil {
-		log.Printf("[SERVER] Local address: %s", localAddr.String())
-	}
-
-	// Verify encoder points to the correct connection
-	log.Printf("[SERVER] Encoder connection verification: %p vs %p", clientConn.encoder, clientConn.Conn)
-
-	log.Printf("[SERVER] Write deadline set to %v, using JSON encoder...", writeDeadline)
-
-	// Create a fresh JSON encoder directly on the connection to fix encoder mismatch issue
-	log.Printf("[SERVER] Creating fresh JSON encoder on connection %p", clientConn.Conn)
-	freshEncoder := json.NewEncoder(clientConn.Conn)
-
-	start := time.Now()
-
-	// Use the fresh JSON encoder to ensure it writes to the correct connection
-	err := freshEncoder.Encode(response)
-	encodeDuration := time.Since(start)
-
-	// Add newline to ensure proper JSON termination
-	if err == nil {
-		log.Printf("[SERVER] Adding newline terminator...")
-		if _, writeErr := clientConn.Conn.Write([]byte("\n")); writeErr != nil {
-			log.Printf("[SERVER] WARNING: Failed to write newline terminator: %v", writeErr)
-		} else {
-			log.Printf("[SERVER] Newline terminator written successfully")
-		}
-	}
-
-	// Explicitly flush the connection to ensure data is sent
-	if flusher, ok := clientConn.Conn.(interface{ Flush() error }); ok {
-		log.Printf("[SERVER] Attempting explicit flush...")
-		if flushErr := flusher.Flush(); flushErr != nil {
-			log.Printf("[SERVER] WARNING: Explicit flush failed: %v", flushErr)
-		} else {
-			log.Printf("[SERVER] Explicit flush completed successfully")
-		}
-	} else {
-		log.Printf("[SERVER] Connection doesn't support explicit flush (normal for Unix sockets)")
-	}
-
-	// Clear write deadline
-	clientConn.Conn.SetWriteDeadline(time.Time{})
-
-	if err != nil {
-		log.Printf("[SERVER] ERROR: JSON encoder failed after %v: %v", encodeDuration, err)
-		log.Printf("[SERVER] Error type: %T", err)
-		if netErr, ok := err.(net.Error); ok {
-			log.Printf("[SERVER] Network error - Timeout: %v, Temporary: %v", netErr.Timeout(), netErr.Temporary())
-		}
-	} else {
-		log.Printf("[SERVER] JSON encoder completed successfully for client %s in %v", clientConn.ID, encodeDuration)
-
-		// Additional verification: confirm connection type
-		if _, ok := clientConn.Conn.(*net.UnixConn); ok {
-			log.Printf("[SERVER] Unix connection confirmed, encoder should have flushed data")
-		}
-
-		log.Printf("[SERVER] State response encoding completed successfully")
+	if err := clientConn.send(response); err != nil {
+		log.Printf("Failed to send state response: %v", err)
 	}
 }
 
 // handlePing processes a ping message from a client
 func (server *SocketServer) handlePing(clientConn *ClientConnection, message IPCMessage) {
 	response := IPCMessage{
-		Type: "pong",
-		Data: map[string]interface{}{
-			"timestamp": time.Now(),
-		},
+		Type:      "pong",
+		RequestID: message.RequestID,
 		Timestamp: time.Now(),
 	}
-	freshEncoder := getFreshEncoder(clientConn)
-	freshEncoder.Encode(response)
+	if err := clientConn.send(response); err != nil {
+		log.Printf("Failed to send pong: %v", err)
+	}
 }
 
 // forwardEvents forwards state events to a client
 func (server *SocketServer) forwardEvents(clientConn *ClientConnection, eventChan chan types.StateEvent) {
-	for {
-		select {
-		case <-server.ctx.Done():
-			return
-		case event, ok := <-eventChan:
-			if !ok {
-				return
-			}
-
-			// Forward event to client using fresh encoder
-			message := IPCMessage{
-				Type: "state_event",
-				Data: event,
-				Timestamp: time.Now(),
-			}
-
-			freshEncoder := getFreshEncoder(clientConn)
-			if err := freshEncoder.Encode(message); err != nil {
-				log.Printf("Failed to forward event to client %s: %v", clientConn.ID, err)
-				return
-			}
+	for event := range eventChan {
+		message := IPCMessage{
+			Type:      "state_event",
+			Data:      event,
+			Timestamp: time.Now(),
+		}
+		if err := clientConn.send(message); err != nil {
+			log.Printf("Failed to forward event to client %s: %v", clientConn.ID, err)
+			return // Stop forwarding if sending fails
 		}
 	}
 }
 
-// manageConnections performs periodic connection health checks
-func (server *SocketServer) manageConnections() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-server.ctx.Done():
-			return
-		case <-ticker.C:
-			server.healthCheckConnections()
-		}
+// sendError sends a generic error message to a client.
+func (server *SocketServer) sendError(clientConn *ClientConnection, errorMsg string) {
+	response := IPCMessage{
+		Type:      "error",
+		Data:      map[string]interface{}{"error": errorMsg},
+		Timestamp: time.Now(),
+	}
+	if err := clientConn.send(response); err != nil {
+		log.Printf("Failed to send error message: %v", err)
 	}
 }
 
-// healthCheckConnections checks for stale connections and removes them
-func (server *SocketServer) healthCheckConnections() {
-	server.connectionsMux.Lock()
-	defer server.connectionsMux.Unlock()
-
-	now := time.Now()
-	for id, conn := range server.connections {
-		// Remove connections that haven't been seen for 5 minutes
-		if now.Sub(conn.LastSeen) > 5*time.Minute {
-			log.Printf("Removing stale connection: %s", id)
-			conn.Conn.Close()
-			delete(server.connections, id)
-		}
+// sendErrorMessage sends a structured error message to a client.
+func (server *SocketServer) sendErrorMessage(clientConn *ClientConnection, messageType, errorMsg, requestID string) {
+	response := IPCMessage{
+		Type:      messageType,
+		RequestID: requestID,
+		Data: map[string]interface{}{
+			"success": false,
+			"error":   errorMsg,
+		},
+		Timestamp: time.Now(),
 	}
+	if err := clientConn.send(response); err != nil {
+		log.Printf("Failed to send structured error message: %v", err)
+	}
+}
+
+// cleanupSocket removes the socket file if it exists
+func (server *SocketServer) cleanupSocket() error {
+	if _, err := os.Stat(server.socketPath); err == nil {
+		return os.Remove(server.socketPath)
+	}
+	return nil
 }
 
 // GetConnections returns information about all active connections
@@ -630,39 +445,4 @@ func (server *SocketServer) IsRunning() bool {
 	server.runningMux.RLock()
 	defer server.runningMux.RUnlock()
 	return server.isRunning
-}
-
-// cleanupSocket removes the socket file if it exists
-func (server *SocketServer) cleanupSocket() error {
-	if _, err := os.Stat(server.socketPath); err == nil {
-		return os.Remove(server.socketPath)
-	}
-	return nil
-}
-
-// sendError sends an error message to a client using fresh encoder
-func (server *SocketServer) sendError(clientConn *ClientConnection, message string) {
-	response := IPCMessage{
-		Type: "error",
-		Data: map[string]interface{}{
-			"error": message,
-		},
-		Timestamp: time.Now(),
-	}
-	freshEncoder := getFreshEncoder(clientConn)
-	freshEncoder.Encode(response)
-}
-
-// sendErrorMessage sends a typed error message to a client using fresh encoder
-func (server *SocketServer) sendErrorMessage(clientConn *ClientConnection, messageType, errorMsg string) {
-	response := IPCMessage{
-		Type: messageType,
-		Data: map[string]interface{}{
-			"success": false,
-			"error":   errorMsg,
-		},
-		Timestamp: time.Now(),
-	}
-	freshEncoder := getFreshEncoder(clientConn)
-	freshEncoder.Encode(response)
 }

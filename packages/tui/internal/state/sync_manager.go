@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -13,18 +14,18 @@ import (
 
 // PanelSyncManager coordinates state updates across panels with persistence
 type PanelSyncManager struct {
-	state           *types.SharedApplicationState
-	eventBus        interfaces.EventBus
-	repository      interfaces.StateRepository
+	state            *types.SharedApplicationState
+	eventBus         interfaces.EventBus
+	repository       interfaces.StateRepository
 	conflictResolver interfaces.ConflictResolver
-	ctx             context.Context
-	cancel          context.CancelFunc
-	syncMutex       sync.RWMutex
-	autoSaveEnabled bool
+	ctx              context.Context
+	cancel           context.CancelFunc
+	syncMutex        sync.RWMutex
+	autoSaveEnabled  bool
 	autoSaveInterval time.Duration
-	lastSaveTime    time.Time
-	saveQueue       chan saveRequest
-	metrics         *SyncMetrics
+	lastSaveTime     time.Time
+	saveQueue        chan saveRequest
+	metrics          *SyncMetrics
 }
 
 // saveRequest represents a queued save operation
@@ -130,13 +131,25 @@ func (manager *PanelSyncManager) Stop() error {
 	return nil
 }
 
+// decodePayload is a helper to convert a map payload from JSON decoding back into a specific struct type.
+func decodePayload(data interface{}, target interface{}) error {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload map: %w", err)
+	}
+	if err := json.Unmarshal(bytes, target); err != nil {
+		return fmt.Errorf("failed to unmarshal payload into target struct: %w", err)
+	}
+	return nil
+}
+
 // UpdateSessionSelection handles session changes from Sessions panel
 func (manager *PanelSyncManager) UpdateSessionSelection(sessionID string, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            SessionChanged,
+		Type:            types.SessionChanged,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         SessionChangePayload{SessionID: sessionID},
+		Payload:         types.SessionChangePayload{SessionID: sessionID},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -145,12 +158,12 @@ func (manager *PanelSyncManager) UpdateSessionSelection(sessionID string, panelI
 }
 
 // AddSession handles adding a new session
-func (manager *PanelSyncManager) AddSession(session SessionInfo, panelID string) error {
-	update := StateUpdate{
+func (manager *PanelSyncManager) AddSession(session types.SessionInfo, panelID string) error {
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            SessionAdded,
+		Type:            types.SessionAdded,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         SessionAddPayload{Session: session},
+		Payload:         types.SessionAddPayload{Session: session},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -160,11 +173,11 @@ func (manager *PanelSyncManager) AddSession(session SessionInfo, panelID string)
 
 // UpdateSession handles updating session metadata
 func (manager *PanelSyncManager) UpdateSession(sessionID, title string, isActive bool, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            SessionUpdated,
+		Type:            types.SessionUpdated,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         SessionUpdatePayload{SessionID: sessionID, Title: title, IsActive: isActive},
+		Payload:         types.SessionUpdatePayload{SessionID: sessionID, Title: title, IsActive: isActive},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -174,11 +187,11 @@ func (manager *PanelSyncManager) UpdateSession(sessionID, title string, isActive
 
 // DeleteSession handles session deletion
 func (manager *PanelSyncManager) DeleteSession(sessionID string, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            SessionDeleted,
+		Type:            types.SessionDeleted,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         SessionDeletePayload{SessionID: sessionID},
+		Payload:         types.SessionDeletePayload{SessionID: sessionID},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -187,12 +200,12 @@ func (manager *PanelSyncManager) DeleteSession(sessionID string, panelID string)
 }
 
 // AddMessage handles new messages from Messages panel
-func (manager *PanelSyncManager) AddMessage(message MessageInfo, panelID string) error {
-	update := StateUpdate{
+func (manager *PanelSyncManager) AddMessage(message types.MessageInfo, panelID string) error {
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            MessageAdded,
+		Type:            types.MessageAdded,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         MessageAddPayload{Message: message},
+		Payload:         types.MessageAddPayload{Message: message},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -202,11 +215,11 @@ func (manager *PanelSyncManager) AddMessage(message MessageInfo, panelID string)
 
 // UpdateMessage handles message updates
 func (manager *PanelSyncManager) UpdateMessage(messageID, content, status string, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            MessageUpdated,
+		Type:            types.MessageUpdated,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         MessageUpdatePayload{MessageID: messageID, Content: content, Status: status},
+		Payload:         types.MessageUpdatePayload{MessageID: messageID, Content: content, Status: status},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -216,11 +229,11 @@ func (manager *PanelSyncManager) UpdateMessage(messageID, content, status string
 
 // UpdateInputBuffer handles input changes from Input panel
 func (manager *PanelSyncManager) UpdateInputBuffer(buffer string, cursorPos, selStart, selEnd int, mode, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            InputUpdated,
+		Type:            types.InputUpdated,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         InputUpdatePayload{
+		Payload:         types.InputUpdatePayload{
 			Buffer:         buffer,
 			CursorPosition: cursorPos,
 			SelectionStart: selStart,
@@ -236,11 +249,11 @@ func (manager *PanelSyncManager) UpdateInputBuffer(buffer string, cursorPos, sel
 
 // MoveCursor handles cursor movement from Input panel
 func (manager *PanelSyncManager) MoveCursor(position, selStart, selEnd int, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            CursorMoved,
+		Type:            types.CursorMoved,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         CursorMovePayload{Position: position, SelectionStart: selStart, SelectionEnd: selEnd},
+		Payload:         types.CursorMovePayload{Position: position, SelectionStart: selStart, SelectionEnd: selEnd},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -250,11 +263,11 @@ func (manager *PanelSyncManager) MoveCursor(position, selStart, selEnd int, pane
 
 // ChangeTheme handles theme changes
 func (manager *PanelSyncManager) ChangeTheme(theme string, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            ThemeChanged,
+		Type:            types.ThemeChanged,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         ThemeChangePayload{Theme: theme},
+		Payload:         types.ThemeChangePayload{Theme: theme},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -264,11 +277,11 @@ func (manager *PanelSyncManager) ChangeTheme(theme string, panelID string) error
 
 // ChangeModel handles model selection changes
 func (manager *PanelSyncManager) ChangeModel(provider, model string, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            ModelChanged,
+		Type:            types.ModelChanged,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         ModelChangePayload{Provider: provider, Model: model},
+		Payload:         types.ModelChangePayload{Provider: provider, Model: model},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -278,11 +291,11 @@ func (manager *PanelSyncManager) ChangeModel(provider, model string, panelID str
 
 // ChangeAgent handles agent selection changes
 func (manager *PanelSyncManager) ChangeAgent(agent string, panelID string) error {
-	update := StateUpdate{
+	update := types.StateUpdate{
 		ID:              generateUpdateID(),
-		Type:            AgentChanged,
+		Type:            types.AgentChanged,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         AgentChangePayload{Agent: agent},
+		Payload:         types.AgentChangePayload{Agent: agent},
 		SourcePanel:     panelID,
 		Timestamp:       time.Now(),
 	}
@@ -319,8 +332,100 @@ func (manager *PanelSyncManager) applyUpdateWithEvents(update types.StateUpdate)
 	return nil
 }
 
+// UpdateWithVersionCheck applies a state update with optimistic locking
+func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate) error {
+	manager.syncMutex.Lock()
+	defer manager.syncMutex.Unlock()
+
+	// Check for version conflicts (optimistic locking)
+	if manager.state.Version.Version != update.ExpectedVersion {
+		return fmt.Errorf("version conflict: expected %d, current %d",
+			update.ExpectedVersion, manager.state.Version.Version)
+	}
+
+	// Apply the update based on its type
+	switch update.Type {
+	case types.SessionAdded:
+		var payload types.SessionAddPayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		manager.state.AddSession(payload.Session)
+		manager.state.Version.Source = update.SourcePanel
+
+	case types.SessionChanged:
+		var payload types.SessionChangePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		if !manager.state.SetCurrentSession(payload.SessionID) {
+			// Log warning instead of error if session does not exist yet
+			log.Printf("Warning: session %s not found during SessionChanged update", payload.SessionID)
+		}
+		manager.state.Version.Source = update.SourcePanel
+
+	case types.SessionDeleted:
+		var payload types.SessionDeletePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		if !manager.state.RemoveSession(payload.SessionID) {
+			return fmt.Errorf("session %s not found for deletion", payload.SessionID)
+		}
+		manager.state.Version.Source = update.SourcePanel
+
+	case types.InputUpdated:
+		var payload types.InputUpdatePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		manager.state.Input.Buffer = payload.Buffer
+		manager.state.Input.CursorPosition = payload.CursorPosition
+		manager.state.Input.SelectionStart = payload.SelectionStart
+		manager.state.Input.SelectionEnd = payload.SelectionEnd
+		if payload.Mode != "" {
+			manager.state.Input.Mode = payload.Mode
+		}
+		manager.state.Version.Version++
+		manager.state.Version.Timestamp = time.Now()
+		manager.state.Version.Source = update.SourcePanel
+
+	case types.CursorMoved:
+		var payload types.CursorMovePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		manager.state.Input.CursorPosition = payload.Position
+		manager.state.Input.SelectionStart = payload.SelectionStart
+		manager.state.Input.SelectionEnd = payload.SelectionEnd
+		manager.state.Version.Version++
+		manager.state.Version.Timestamp = time.Now()
+		manager.state.Version.Source = update.SourcePanel
+
+	case types.ThemeChanged:
+		var payload types.ThemeChangePayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		manager.state.Theme = payload.Theme
+		manager.state.Version.Version++
+		manager.state.Version.Timestamp = time.Now()
+		manager.state.Version.Source = update.SourcePanel
+
+	default:
+		log.Printf("Warning: unhandled update type in UpdateWithVersionCheck: %s. Bumping version only.", update.Type)
+		manager.state.Version.Version++
+		manager.state.Version.Timestamp = time.Now()
+		manager.state.Version.Source = update.SourcePanel
+		manager.state.LastUpdate = time.Now()
+		manager.state.UpdateCount++
+	}
+
+	return nil
+}
+
 // GetState returns a copy of the current state
-func (manager *PanelSyncManager) GetState() *SharedApplicationState {
+func (manager *PanelSyncManager) GetState() *types.SharedApplicationState {
 	manager.syncMutex.RLock()
 	defer manager.syncMutex.RUnlock()
 	return manager.state.Clone()
@@ -426,42 +531,6 @@ func (manager *PanelSyncManager) ForceFullSync() error {
 	return nil
 }
 
-// UpdateWithVersionCheck applies a state update with optimistic locking
-func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate) error {
-	manager.syncMutex.Lock()
-	defer manager.syncMutex.Unlock()
-
-	// Check for version conflicts (optimistic locking)
-	if manager.state.Version.Version != update.ExpectedVersion {
-		return fmt.Errorf("version conflict: expected %d, current %d",
-			update.ExpectedVersion, manager.state.Version.Version)
-	}
-
-	// Apply the update based on its type
-	switch update.Type {
-	case types.SessionAdded:
-		if payload, ok := update.Payload.(SessionAddPayload); ok {
-			// Use the existing thread-safe method on SharedApplicationState
-			manager.state.AddSession(payload.Session)
-			// Adjust metadata that AddSession doesn't cover
-			manager.state.Version.Source = update.SourcePanel
-		} else {
-			return fmt.Errorf("invalid payload for SessionAdded: %T", update.Payload)
-		}
-
-	default:
-		// For other update types, for now, just update version and metadata
-		// This is the old, incomplete behavior and should be implemented fully
-		manager.state.Version.Version++
-		manager.state.Version.Timestamp = time.Now()
-		manager.state.Version.Source = update.SourcePanel
-		manager.state.LastUpdate = time.Now()
-		manager.state.UpdateCount++
-	}
-
-	return nil
-}
-
 // GetMetrics returns sync manager metrics
 func (manager *PanelSyncManager) GetMetrics() interfaces.StateManagerMetrics {
 	m := manager.metrics
@@ -515,7 +584,7 @@ type SyncMetrics struct {
 	TotalUpdates         int64                    `json:"total_updates"`
 	SuccessfulUpdates    int64                    `json:"successful_updates"`
 	FailedUpdates        int64                    `json:"failed_updates"`
-	UpdatesByType        map[UpdateType]int64     `json:"updates_by_type"`
+	UpdatesByType        map[types.UpdateType]int64     `json:"updates_by_type"`
 	TotalSaves           int64                    `json:"total_saves"`
 	SuccessfulSaves      int64                    `json:"successful_saves"`
 	FailedSaves          int64                    `json:"failed_saves"`
@@ -530,12 +599,12 @@ type SyncMetrics struct {
 // NewSyncMetrics creates a new sync metrics tracker
 func NewSyncMetrics() *SyncMetrics {
 	return &SyncMetrics{
-		UpdatesByType: make(map[UpdateType]int64),
+		UpdatesByType: make(map[types.UpdateType]int64),
 	}
 }
 
 // RecordUpdate records statistics for a state update
-func (m *SyncMetrics) RecordUpdate(updateType UpdateType, success bool, duration time.Duration) {
+func (m *SyncMetrics) RecordUpdate(updateType types.UpdateType, success bool, duration time.Duration) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 

@@ -510,7 +510,7 @@ func (p InputPanel) sendMessage() tea.Cmd {
 		p.addToHistory(message)
 
 		// Create message info
-		messageInfo := state.MessageInfo{
+		messageInfo := types.MessageInfo{
 			ID:        fmt.Sprintf("msg_%d", time.Now().UnixNano()),
 			SessionID: p.currentSessionID,
 			Type:      "user",
@@ -520,14 +520,14 @@ func (p InputPanel) sendMessage() tea.Cmd {
 		}
 
 		// Send state update
-		update := state.StateUpdate{
-			Type:        state.MessageAdded,
-			Payload:     state.MessageAddPayload{Message: messageInfo},
+		update := types.StateUpdate{
+			Type:        types.MessageAdded,
+			Payload:     types.MessageAddPayload{Message: messageInfo},
 			SourcePanel: "input-panel",
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -559,7 +559,7 @@ func (p InputPanel) sendMessage() tea.Cmd {
 				return ErrorMsg{Error: fmt.Errorf("assistant error: %s", response.Info.Error.Name)}
 			}
 
-			assistantMessage := state.MessageInfo{
+			assistantMessage := types.MessageInfo{
 				ID:        response.Info.ID, // Use the actual message ID from response
 				SessionID: p.currentSessionID,
 				Type:      "assistant",
@@ -583,15 +583,14 @@ func (p InputPanel) sendMessage() tea.Cmd {
 			}
 
 			// Send assistant message state update
-			assistantUpdate := state.StateUpdate{
-				Type:            state.MessageAdded,
-				ExpectedVersion: p.ipcClient.GetCurrentVersion(),
-				Payload:         state.MessageAddPayload{Message: assistantMessage},
-				SourcePanel:     "input-panel",
-				Timestamp:       time.Now(),
+			assistantUpdate := types.StateUpdate{
+				Type:        types.MessageAdded,
+				Payload:     types.MessageAddPayload{Message: assistantMessage},
+				SourcePanel: "input-panel",
+				Timestamp:   time.Now(),
 			}
 
-			if err := p.ipcClient.SendStateUpdate(assistantUpdate); err != nil {
+			if err := p.ipcClient.SendStateUpdateAndWait(assistantUpdate); err != nil {
 				log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
 			} else {
 				log.Printf("[INPUT] Successfully added assistant response to state")
@@ -621,8 +620,8 @@ func (p *InputPanel) addToHistory(message string) {
 
 // Event handlers
 
-func (p *InputPanel) handleInputUpdated(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.InputUpdatePayload); ok {
+func (p *InputPanel) handleInputUpdated(event types.StateEvent) error {
+	if payload, ok := event.Data.(types.InputUpdatePayload); ok {
 		// Only update if not from this panel
 		if event.SourcePanel != "input-panel" {
 			p.buffer = payload.Buffer
@@ -637,8 +636,8 @@ func (p *InputPanel) handleInputUpdated(event state.StateEvent) error {
 	return nil
 }
 
-func (p *InputPanel) handleCursorMoved(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.CursorMovePayload); ok {
+func (p *InputPanel) handleCursorMoved(event types.StateEvent) error {
+	if payload, ok := event.Data.(types.CursorMovePayload); ok {
 		// Only update if not from this panel
 		if event.SourcePanel != "input-panel" {
 			p.cursorPosition = payload.Position
@@ -649,51 +648,49 @@ func (p *InputPanel) handleCursorMoved(event state.StateEvent) error {
 	return nil
 }
 
-func (p *InputPanel) handleSessionChanged(event state.StateEvent) error {
-	if payload, ok := event.Data.(state.SessionChangePayload); ok {
-		p.currentSessionID = payload.SessionID
-		log.Printf("Session changed: %s", payload.SessionID)
+func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
+	if payload, ok := event.Data.(types.SessionChangePayload); ok {
+			p.currentSessionID = payload.SessionID
+			log.Printf("Session changed: %s", payload.SessionID)
 	}
 	return nil
 }
 
-func (p *InputPanel) handleStateSync(event state.StateEvent) error {
+func (p *InputPanel) handleStateSync(event types.StateEvent) error {
 	if payload, ok := event.Data.(types.StateSyncPayload); ok {
-		p.currentSessionID = payload.State.CurrentSessionID
-		p.buffer = payload.State.Input.Buffer
-		p.cursorPosition = payload.State.Input.CursorPosition
-		p.selectionStart = payload.State.Input.SelectionStart
-		p.selectionEnd = payload.State.Input.SelectionEnd
-		p.mode = payload.State.Input.Mode
-		p.history = payload.State.Input.History
-		p.historyIndex = payload.State.Input.HistoryIndex
-		log.Printf("State synchronized")
+			p.currentSessionID = payload.State.CurrentSessionID
+			p.buffer = payload.State.Input.Buffer
+			p.cursorPosition = payload.State.Input.CursorPosition
+			p.selectionStart = payload.State.Input.SelectionStart
+			p.selectionEnd = payload.State.Input.SelectionEnd
+			p.mode = payload.State.Input.Mode
+			p.history = payload.State.Input.History
+			p.historyIndex = payload.State.Input.HistoryIndex
+			log.Printf("State synchronized")
 	}
 	return nil
 }
 
-func (p *InputPanel) handleInputEvent(event state.StateEvent) (InputPanel, tea.Cmd) {
+func (p *InputPanel) handleInputEvent(event types.StateEvent) (InputPanel, tea.Cmd) {
 	switch event.Type {
-	case state.EventInputUpdated:
+	case types.EventInputUpdated:
 		p.handleInputUpdated(event)
-	case state.EventCursorMoved:
+	case types.EventCursorMoved:
 		p.handleCursorMoved(event)
-	case state.EventSessionChanged:
+	case types.EventSessionChanged:
 		p.handleSessionChanged(event)
-	case state.EventStateSync:
+	case types.EventStateSync:
 		p.handleStateSync(event)
 	}
 	return *p, nil
 }
-
 // Sync methods
 
 func (p InputPanel) syncInputState() tea.Cmd {
 	return func() tea.Msg {
-		update := state.StateUpdate{
-			Type:            state.InputUpdated,
-			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
-			Payload: state.InputUpdatePayload{
+		update := types.StateUpdate{
+			Type: types.InputUpdated,
+			Payload: types.InputUpdatePayload{
 				Buffer:         p.buffer,
 				CursorPosition: p.cursorPosition,
 				SelectionStart: p.selectionStart,
@@ -704,7 +701,7 @@ func (p InputPanel) syncInputState() tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -714,10 +711,9 @@ func (p InputPanel) syncInputState() tea.Cmd {
 
 func (p InputPanel) syncCursorPosition() tea.Cmd {
 	return func() tea.Msg {
-		update := state.StateUpdate{
-			Type:            state.CursorMoved,
-			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
-			Payload: state.CursorMovePayload{
+		update := types.StateUpdate{
+			Type: types.CursorMoved,
+			Payload: types.CursorMovePayload{
 				Position:       p.cursorPosition,
 				SelectionStart: p.selectionStart,
 				SelectionEnd:   p.selectionEnd,
@@ -726,7 +722,7 @@ func (p InputPanel) syncCursorPosition() tea.Cmd {
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -771,10 +767,9 @@ func (p InputPanel) createNewSession() tea.Cmd {
 		log.Printf("[INPUT] Successfully created session on OpenCode server: %s", session.ID)
 
 		// Now create local state update with the server-assigned session ID
-		update := state.StateUpdate{
-			Type:            state.SessionAdded,
-			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
-			Payload: state.SessionAddPayload{
+		update := types.StateUpdate{
+			Type: types.SessionAdded,
+			Payload: types.SessionAddPayload{
 				Session: types.SessionInfo{
 					ID:           session.ID, // Use server-assigned ID
 					Title:        session.Title,
@@ -789,7 +784,7 @@ func (p InputPanel) createNewSession() tea.Cmd {
 		}
 
 		// Send the update via IPC
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			log.Printf("[INPUT] Failed to send session state update: %v", err)
 			return ErrorMsg{Error: err}
 		}
@@ -800,15 +795,14 @@ func (p InputPanel) createNewSession() tea.Cmd {
 
 func (p InputPanel) switchToSession(sessionID string) tea.Cmd {
 	return func() tea.Msg {
-		update := state.StateUpdate{
-			Type:            state.SessionChanged,
-			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
-			Payload:         state.SessionChangePayload{SessionID: sessionID},
-			SourcePanel:     "input-panel",
-			Timestamp:       time.Now(),
+		update := types.StateUpdate{
+			Type:        types.SessionChanged,
+			Payload:     types.SessionChangePayload{SessionID: sessionID},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -839,15 +833,14 @@ func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
 		log.Printf("[INPUT] Successfully deleted session on OpenCode server: %s", sessionID)
 
 		// Now update local state
-		update := state.StateUpdate{
-			Type:            state.SessionDeleted,
-			ExpectedVersion: p.ipcClient.GetCurrentVersion(),
-			Payload:         state.SessionDeletePayload{SessionID: sessionID},
-			SourcePanel:     "input-panel",
-			Timestamp:       time.Now(),
+		update := types.StateUpdate{
+			Type:        types.SessionDeleted,
+			Payload:     types.SessionDeletePayload{SessionID: sessionID},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			log.Printf("[INPUT] Failed to send session delete state update: %v", err)
 			return ErrorMsg{Error: err}
 		}
@@ -858,14 +851,14 @@ func (p InputPanel) deleteSession(sessionID string) tea.Cmd {
 
 func (p InputPanel) changeTheme(theme string) tea.Cmd {
 	return func() tea.Msg {
-		update := state.StateUpdate{
-			Type:        state.ThemeChanged,
-			Payload:     state.ThemeChangePayload{Theme: theme},
+		update := types.StateUpdate{
+			Type:        types.ThemeChanged,
+			Payload:     types.ThemeChangePayload{Theme: theme},
 			SourcePanel: "input-panel",
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -875,14 +868,14 @@ func (p InputPanel) changeTheme(theme string) tea.Cmd {
 
 func (p InputPanel) changeModel(provider, model string) tea.Cmd {
 	return func() tea.Msg {
-		update := state.StateUpdate{
-			Type:        state.ModelChanged,
-			Payload:     state.ModelChangePayload{Provider: provider, Model: model},
+		update := types.StateUpdate{
+			Type:        types.ModelChanged,
+			Payload:     types.ModelChangePayload{Provider: provider, Model: model},
 			SourcePanel: "input-panel",
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -892,14 +885,14 @@ func (p InputPanel) changeModel(provider, model string) tea.Cmd {
 
 func (p InputPanel) changeAgent(agent string) tea.Cmd {
 	return func() tea.Msg {
-		update := state.StateUpdate{
-			Type:        state.AgentChanged,
-			Payload:     state.AgentChangePayload{Agent: agent},
+		update := types.StateUpdate{
+			Type:        types.AgentChanged,
+			Payload:     types.AgentChangePayload{Agent: agent},
 			SourcePanel: "input-panel",
 			Timestamp:   time.Now(),
 		}
 
-		if err := p.ipcClient.SendStateUpdate(update); err != nil {
+		if err := p.ipcClient.SendStateUpdateAndWait(update); err != nil {
 			return ErrorMsg{Error: err}
 		}
 
@@ -1020,11 +1013,11 @@ type InfoMsg struct {
 }
 
 type InputEventMsg struct {
-	Event state.StateEvent
+	Event types.StateEvent
 }
 
 type MessageSentMsg struct {
-	Message state.MessageInfo
+	Message types.MessageInfo
 }
 
 // Utility functions
@@ -1081,7 +1074,7 @@ func main() {
 	panel := NewInputPanel(httpClient, socketPath)
 
 	program := tea.NewProgram(
-		panel,
+		*panel,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
