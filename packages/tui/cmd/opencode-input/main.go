@@ -963,11 +963,17 @@ func (p *InputPanel) changeAgent(agent string) tea.Cmd {
     }
 }
 
-// renderInput renders the input panel
+// renderInput renders the input panel with dynamic height management
 func (p *InputPanel) renderInput() string {
 	t := theme.CurrentTheme()
 
 	var content string
+	
+	// Calculate available height (reserve some space for margins)
+	availableHeight := p.height - 2
+	if availableHeight < 10 {
+		availableHeight = 10 // Minimum height
+	}
 
 	// Header
 	header := "Input"
@@ -978,17 +984,32 @@ func (p *InputPanel) renderInput() string {
 		header += " [MULTILINE]"
 	}
 
-	content += styles.NewStyle().
+	headerContent := styles.NewStyle().
 		Foreground(t.Primary()).
 		Bold(true).
 		Render(header) + "\n\n"
+	
+	content += headerContent
+	usedLines := 3 // Header + spacing
 
-	// Input field
+	// Input field with dynamic height
 	inputStyle := styles.NewStyle().
 		Border(styles.RoundedBorder).
 		BorderForeground(t.Border()).
 		Padding(1).
 		Width(p.width - 2)
+
+	// Calculate input field height based on content
+	inputLines := strings.Count(p.buffer, "\n") + 1
+	maxInputHeight := availableHeight - usedLines - 4 // Reserve space for other elements
+	if maxInputHeight < 3 {
+		maxInputHeight = 3
+	}
+	
+	// Limit input height if needed
+	if inputLines > maxInputHeight {
+		inputStyle = inputStyle.Height(maxInputHeight)
+	}
 
 	// Render buffer with cursor
 	displayBuffer := p.buffer
@@ -999,7 +1020,9 @@ func (p *InputPanel) renderInput() string {
 			displayBuffer[p.cursorPosition:]
 	}
 
-	content += inputStyle.Render(displayBuffer) + "\n"
+	inputContent := inputStyle.Render(displayBuffer) + "\n"
+	content += inputContent
+	usedLines += max(inputLines+2, 4) // Input field + border
 
 	// Mode indicator
 	modeText := fmt.Sprintf("Mode: %s", p.mode)
@@ -1007,21 +1030,104 @@ func (p *InputPanel) renderInput() string {
 		modeText += fmt.Sprintf(" | History: %d items", len(p.history))
 	}
 
-	content += styles.NewStyle().
+	modeContent := styles.NewStyle().
 		Foreground(t.TextMuted()).
 		Render(modeText) + "\n"
+	
+	content += modeContent
+	usedLines += 1
 
 	// Help text
 	helpText := "Enter send • Ctrl+Enter multiline • ↑/↓ history • Tab complete • F1 help • Ctrl+C quit"
-	content += styles.NewStyle().
+	helpContent := styles.NewStyle().
 		Foreground(t.TextMuted()).
 		Render(helpText)
+	
+	content += helpContent
+	usedLines += 1
 
+	// Show help if requested and there's space
 	if p.showHelp {
-		content += "\n\n" + p.renderHelp()
+		remainingLines := availableHeight - usedLines
+		if remainingLines > 5 {
+			content += "\n\n" + p.renderHelpCompact(remainingLines - 2)
+		} else {
+			// Not enough space for help, show a hint
+			content += "\n" + styles.NewStyle().
+				Foreground(t.Warning()).
+				Render("(Help available - resize window or press F1 to toggle)")
+		}
 	}
 
 	return content
+}
+
+// renderHelpCompact renders a compact version of help text that fits in available space
+func (p *InputPanel) renderHelpCompact(maxLines int) string {
+	t := theme.CurrentTheme()
+
+	// Full help content
+	fullHelpLines := []string{
+		"Commands:",
+		"  /help                    Show this help",
+		"  /clear                   Clear current session messages",
+		"  /new                     Create new session",
+		"  /session <id>            Switch to session",
+		"  /theme <name>            Change theme",
+		"  /model <provider> <model> Change model",
+		"  /agent <name>            Change agent",
+		"",
+		"Keyboard Shortcuts:",
+		"  Enter                    Send message",
+		"  Ctrl+Enter               Toggle multiline mode",
+		"  ↑/↓                     Navigate history",
+		"  Tab                      Command completion",
+		"  Ctrl+A                   Select all",
+		"  Ctrl+K                   Delete to end of line",
+		"  Ctrl+U                   Delete to beginning of line",
+		"  Ctrl+W                   Delete previous word",
+		"  Ctrl+L                   Clear buffer",
+		"  F1                       Toggle this help",
+		"  Ctrl+C                   Quit (or clear if buffer not empty)",
+	}
+
+	// If we have enough space, show full help
+	if maxLines >= len(fullHelpLines) + 2 {
+		return p.renderHelp()
+	}
+
+	// Otherwise, show a truncated version
+	var helpLines []string
+	
+	// Always show commands section if we have space
+	if maxLines >= 10 {
+		helpLines = append(helpLines, fullHelpLines[0:8]...)
+		if maxLines >= 15 {
+			helpLines = append(helpLines, "")
+			helpLines = append(helpLines, "Key Shortcuts: Enter=send, Ctrl+Enter=multiline, ↑/↓=history, F1=help")
+		}
+	} else {
+		// Very limited space - show essential info only
+		helpLines = []string{
+			"Essential Commands:",
+			"  /help /clear /new /session <id>",
+			"Keys: Enter=send, Ctrl+Enter=multiline, F1=toggle help",
+		}
+	}
+
+	// Add truncation indicator if needed
+	if len(helpLines) < len(fullHelpLines) {
+		helpLines = append(helpLines, "... (resize window for full help)")
+	}
+
+	helpContent := strings.Join(helpLines, "\n")
+
+	return styles.NewStyle().
+		Foreground(t.Info()).
+		Border(styles.RoundedBorder).
+		BorderForeground(t.Border()).
+		Padding(1).
+		Render(helpContent)
 }
 
 // renderHelp renders the help text
