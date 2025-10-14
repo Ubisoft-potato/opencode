@@ -507,7 +507,8 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 
 	switch cmd {
 	case "/help":
-		return p, p.showHelpMessage()
+		// 显示内置帮助视图，而不是发送无处渲染的 InfoMsg
+		p.showHelp = true
 	case "/clear":
 		return p, p.clearMessages()
 	case "/new":
