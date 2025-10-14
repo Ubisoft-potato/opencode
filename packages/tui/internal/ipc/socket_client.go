@@ -19,28 +19,29 @@ import (
 
 // SocketClient manages Unix Domain Socket client for panel communication
 type SocketClient struct {
-	socketPath         string
-	panelID            string
-	panelType          string
-	conn               net.Conn
-	encoder            *json.Encoder
-	decoder            *json.Decoder
-	connectionID       string
-	isConnected        bool
-	connectionMux      sync.RWMutex
-	eventHandlers      map[types.StateEventType][]EventHandler
-	handlerMux         sync.RWMutex
-	ctx                context.Context
-	cancel             context.CancelFunc
-	reconnectDelay     time.Duration
-	maxReconnects      int
-	reconnectCount     int
-	lastPingTime       time.Time
-	pingInterval       time.Duration
-	pendingRequests    map[string]chan IPCMessage // Maps requestID to a response channel
-	pendingRequestsMux sync.Mutex                 // Mutex for pendingRequests map
-	currentVersion     int64                        // Track current state version
-	versionMux         sync.RWMutex                 // Mutex for version access
+    socketPath         string
+    panelID            string
+    panelType          string
+    conn               net.Conn
+    encoder            *json.Encoder
+    decoder            *json.Decoder
+    connectionID       string
+    isConnected        bool
+    connectionMux      sync.RWMutex
+    eventHandlers      map[types.StateEventType][]EventHandler
+    handlerMux         sync.RWMutex
+    ctx                context.Context
+    cancel             context.CancelFunc
+    reconnectDelay     time.Duration
+    maxReconnects      int
+    reconnectCount     int
+    lastPingTime       time.Time
+    pingInterval       time.Duration
+    pendingRequests    map[string]chan IPCMessage // Maps requestID to a response channel
+    pendingRequestsMux sync.Mutex                 // Mutex for pendingRequests map
+    currentVersion     int64                        // Track current state version
+    versionMux         sync.RWMutex                 // Mutex for version access
+    sendMutex          sync.Mutex                   // Synchronize writes to the connection
 }
 
 // EventHandler defines the signature for event handling functions
@@ -128,17 +129,20 @@ func (client *SocketClient) Disconnect() error {
 
 // performHandshake exchanges handshake messages with the server
 func (client *SocketClient) performHandshake() error {
-	handshake := HandshakeMessage{
-		Type:      "handshake",
-		PanelID:   client.panelID,
-		PanelType: client.panelType,
-		Version:   "1.0",
-		Timestamp: time.Now(),
-	}
+    handshake := HandshakeMessage{
+        Type:      "handshake",
+        PanelID:   client.panelID,
+        PanelType: client.panelType,
+        Version:   "1.0",
+        Timestamp: time.Now(),
+    }
 
-	if err := client.encoder.Encode(handshake); err != nil {
-		return fmt.Errorf("failed to send handshake: %w", err)
-	}
+    client.sendMutex.Lock()
+    err := client.encoder.Encode(handshake)
+    client.sendMutex.Unlock()
+    if err != nil {
+        return fmt.Errorf("failed to send handshake: %w", err)
+    }
 
 	var response HandshakeResponse
 	if err := client.decoder.Decode(&response); err != nil {
@@ -184,10 +188,13 @@ func (client *SocketClient) sendRequestAndWait(message *IPCMessage, timeout time
 		client.pendingRequestsMux.Unlock()
 	}()
 
-	// Send the request
-	if err := client.encoder.Encode(message); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
+    // Send the request
+    client.sendMutex.Lock()
+    err := client.encoder.Encode(message)
+    client.sendMutex.Unlock()
+    if err != nil {
+        return nil, fmt.Errorf("failed to send request: %w", err)
+    }
 
 	// Wait for the response or timeout
 	select {
@@ -408,15 +415,18 @@ func (client *SocketClient) sendPing() {
 	}
 	client.connectionMux.RUnlock()
 
-	message := IPCMessage{
-		Type:      "ping",
-		Timestamp: time.Now(),
-	}
+    message := IPCMessage{
+        Type:      "ping",
+        Timestamp: time.Now(),
+    }
 
-	if err := client.encoder.Encode(message); err != nil {
-		log.Printf("Failed to send ping: %v", err)
-		client.handleConnectionError(err)
-	}
+    client.sendMutex.Lock()
+    err := client.encoder.Encode(message)
+    client.sendMutex.Unlock()
+    if err != nil {
+        log.Printf("Failed to send ping: %v", err)
+        client.handleConnectionError(err)
+    }
 }
 
 // handleConnectionError handles connection errors and attempts reconnection

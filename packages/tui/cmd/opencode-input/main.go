@@ -583,58 +583,59 @@ func (p *InputPanel) sendMessage() tea.Cmd {
             p.version = newVersion
         }
 
-		// Send to OpenCode API
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		// Perform API call in background so UI remains responsive
+		go func(sessionID, userMsg string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
-		response, err := p.client.Session.Prompt(ctx, p.currentSessionID, opencode.SessionPromptParams{
-			Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
-				opencode.TextPartInputParam{
-					Text: opencode.F(message),
-					Type: opencode.F(opencode.TextPartInputTypeText),
-				},
-			}),
-		})
+			response, err := p.client.Session.Prompt(ctx, sessionID, opencode.SessionPromptParams{
+				Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
+					opencode.TextPartInputParam{
+						Text: opencode.F(userMsg),
+						Type: opencode.F(opencode.TextPartInputTypeText),
+					},
+				}),
+			})
 
-		if err != nil {
-			log.Printf("[INPUT] Failed to send message to OpenCode API: %v", err)
-			return ErrorMsg{Error: fmt.Errorf("failed to send message to OpenCode: %w", err)}
-		}
-
-		log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
-
-		// Create assistant message from response
-		if response != nil {
-			// Check for errors in the response
-			if response.Info.Error.Name != "" {
-				log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
-				return ErrorMsg{Error: fmt.Errorf("assistant error: %s", response.Info.Error.Name)}
+			if err != nil {
+				log.Printf("[INPUT] Failed to send message to OpenCode API: %v", err)
+				return
 			}
 
-			assistantMessage := types.MessageInfo{
-				ID:        response.Info.ID, // Use the actual message ID from response
-				SessionID: p.currentSessionID,
-				Type:      "assistant",
-				Content:   "", // Will be populated from response parts
-				Timestamp: time.Now(),
-				Status:    "completed",
-			}
+			log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
 
-			// Extract content from response parts
-			if len(response.Parts) > 0 {
-				var contentParts []string
-				for _, part := range response.Parts {
-					// Filter for text parts and skip synthetic parts
-					if part.Type == opencode.PartTypeText && !part.Synthetic {
-						if strings.TrimSpace(part.Text) != "" {
-							contentParts = append(contentParts, part.Text)
+			// Create assistant message from response
+			if response != nil {
+				// Check for errors in the response
+				if response.Info.Error.Name != "" {
+					log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
+					return
+				}
+
+				assistantMessage := types.MessageInfo{
+					ID:        response.Info.ID, // Use the actual message ID from response
+					SessionID: sessionID,
+					Type:      "assistant",
+					Content:   "", // Will be populated from response parts
+					Timestamp: time.Now(),
+					Status:    "completed",
+				}
+
+				// Extract content from response parts
+				if len(response.Parts) > 0 {
+					var contentParts []string
+					for _, part := range response.Parts {
+						// Filter for text parts and skip synthetic parts
+						if part.Type == opencode.PartTypeText && !part.Synthetic {
+							if strings.TrimSpace(part.Text) != "" {
+								contentParts = append(contentParts, part.Text)
+							}
 						}
 					}
+					assistantMessage.Content = strings.Join(contentParts, "\n")
 				}
-				assistantMessage.Content = strings.Join(contentParts, "\n")
-			}
 
-			// Send assistant message state update
+				// Send assistant message state update
             assistantUpdate := types.StateUpdate{
                 Type:            types.MessageAdded,
                 Payload:         types.MessageAddPayload{Message: assistantMessage},
@@ -649,8 +650,10 @@ func (p *InputPanel) sendMessage() tea.Cmd {
                 p.version = newVersion
                 log.Printf("[INPUT] Successfully added assistant response to state")
             }
-		}
+			}
+		}(p.currentSessionID, message)
 
+		// Immediately clear input buffer in UI
 		return MessageSentMsg{Message: messageInfo}
 	}
 }
@@ -877,8 +880,22 @@ func (p *InputPanel) createNewSession() tea.Cmd {
             p.version = newVersion
         }
 
-		return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
-	}
+        // Broadcast session change so other panels switch, and update locally
+        change := types.StateUpdate{
+            Type:        types.SessionChanged,
+            Payload:     types.SessionChangePayload{SessionID: session.ID},
+            SourcePanel: "input-panel",
+            Timestamp:   time.Now(),
+        }
+        if newVersion, err := p.sendUpdateWithRetry(change); err != nil {
+            log.Printf("[INPUT] Failed to broadcast session change: %v", err)
+        } else {
+            p.version = newVersion
+        }
+        p.currentSessionID = session.ID
+
+        return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
+    }
 }
 
 func (p *InputPanel) switchToSession(sessionID string) tea.Cmd {
@@ -895,6 +912,9 @@ func (p *InputPanel) switchToSession(sessionID string) tea.Cmd {
         } else {
             p.version = newVersion
         }
+
+        // Update local header immediately
+        p.currentSessionID = sessionID
 
         return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
     }
@@ -937,8 +957,12 @@ func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
             p.version = newVersion
         }
 
-		return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
-	}
+        if p.currentSessionID == sessionID {
+            p.currentSessionID = ""
+        }
+
+        return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
+    }
 }
 
 func (p *InputPanel) changeTheme(theme string) tea.Cmd {
