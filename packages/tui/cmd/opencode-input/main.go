@@ -42,6 +42,10 @@ type InputPanel struct {
 	showHelp         bool
 	lastCommand      string
     version          int64
+	// Scroll state for help content
+	helpScrollOffset int    // Current scroll position in help content
+	helpScrollMode   bool   // Whether we're in help scroll mode
+	helpLines        []string // Cached help lines for scrolling
 }
 
 // NewInputPanel creates a new input panel
@@ -62,6 +66,9 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 		cancel:         cancel,
 		isMultiline:    false,
 		showHelp:       false,
+		helpScrollOffset: 0,
+		helpScrollMode:   false,
+		helpLines:        make([]string, 0),
 	}
 
     // Register event handlers
@@ -267,9 +274,17 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return p.handleShiftTab()
 
 	case "up":
+		// If in help scroll mode, scroll up in help content
+		if p.helpScrollMode && p.showHelp {
+			return p.handleHelpScrollUp()
+		}
 		return p.handleArrowUp()
 
 	case "down":
+		// If in help scroll mode, scroll down in help content
+		if p.helpScrollMode && p.showHelp {
+			return p.handleHelpScrollDown()
+		}
 		return p.handleArrowDown()
 
 	case "left":
@@ -321,6 +336,34 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "f1":
 		p.showHelp = !p.showHelp
+		// Reset scroll state when toggling help
+		if p.showHelp {
+			p.helpScrollOffset = 0
+			p.helpScrollMode = true
+			p.cacheHelpLines()
+		} else {
+			p.helpScrollMode = false
+		}
+		return p, nil
+
+	case "pgup", "page_up":
+		if p.showHelp && p.helpScrollMode {
+			return p.handleHelpPageUp()
+		}
+		return p, nil
+
+	case "pgdn", "page_down":
+		if p.showHelp && p.helpScrollMode {
+			return p.handleHelpPageDown()
+		}
+		return p, nil
+
+	case "esc":
+		// Exit help scroll mode
+		if p.helpScrollMode {
+			p.helpScrollMode = false
+			p.helpScrollOffset = 0
+		}
 		return p, nil
 
 	default:
@@ -945,22 +988,94 @@ func (p *InputPanel) changeModel(provider, model string) tea.Cmd {
 }
 
 func (p *InputPanel) changeAgent(agent string) tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type:            types.AgentChanged,
-            Payload:         types.AgentChangePayload{Agent: agent},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	log.Printf("[INPUT] Changing agent to: %s", agent)
 
-        return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
-    }
+	update := types.StateUpdate{
+		Type: types.AgentChanged,
+		Payload: types.AgentChangePayload{Agent: agent},
+		SourcePanel: "input-panel",
+		ExpectedVersion: p.expectedVersion(),
+	}
+
+	_, err := p.sendUpdateWithRetry(update)
+	if err != nil {
+		log.Printf("[INPUT] Failed to change agent: %v", err)
+		return func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("failed to change agent: %v", err)}
+		}
+	}
+
+	return nil
+}
+
+// cacheHelpLines caches the full help content lines for scrolling
+func (p *InputPanel) cacheHelpLines() {
+	fullHelpLines := []string{
+		"Commands:",
+		"  /help                    Show this help",
+		"  /clear                   Clear current session messages",
+		"  /new                     Create new session",
+		"  /session <id>            Switch to session",
+		"  /theme <name>            Change theme",
+		"  /model <provider> <model> Change model",
+		"  /agent <name>            Change agent",
+		"",
+		"Keyboard Shortcuts:",
+		"  Enter                    Send message",
+		"  Ctrl+Enter               Toggle multiline mode",
+		"  ↑/↓                     Navigate history",
+		"  Tab                      Command completion",
+		"  Ctrl+A                   Select all",
+		"  Ctrl+K                   Delete to end of line",
+		"  Ctrl+U                   Delete to beginning of line",
+		"  Ctrl+W                   Delete previous word",
+		"  Ctrl+L                   Clear buffer",
+		"  F1                       Toggle this help",
+		"  Page Up/Down             Scroll help content",
+		"  Esc                      Exit help scroll mode",
+		"  Ctrl+C                   Quit (or clear if buffer not empty)",
+	}
+	p.helpLines = fullHelpLines
+}
+
+// handleHelpScrollUp scrolls up in help content
+func (p *InputPanel) handleHelpScrollUp() (tea.Model, tea.Cmd) {
+	if p.helpScrollOffset > 0 {
+		p.helpScrollOffset--
+	}
+	return p, nil
+}
+
+// handleHelpScrollDown scrolls down in help content
+func (p *InputPanel) handleHelpScrollDown() (tea.Model, tea.Cmd) {
+	maxOffset := len(p.helpLines) - 1
+	if p.helpScrollOffset < maxOffset {
+		p.helpScrollOffset++
+	}
+	return p, nil
+}
+
+// handleHelpPageUp scrolls up by page in help content
+func (p *InputPanel) handleHelpPageUp() (tea.Model, tea.Cmd) {
+	pageSize := max(1, p.height/4) // Scroll by quarter of screen height
+	p.helpScrollOffset = max(0, p.helpScrollOffset-pageSize)
+	return p, nil
+}
+
+// handleHelpPageDown scrolls down by page in help content
+func (p *InputPanel) handleHelpPageDown() (tea.Model, tea.Cmd) {
+	pageSize := max(1, p.height/4) // Scroll by quarter of screen height
+	maxOffset := len(p.helpLines) - 1
+	p.helpScrollOffset = min(maxOffset, p.helpScrollOffset+pageSize)
+	return p, nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // renderInput renders the input panel with dynamic height management
@@ -1066,6 +1181,11 @@ func (p *InputPanel) renderInput() string {
 func (p *InputPanel) renderHelpCompact(maxLines int) string {
 	t := theme.CurrentTheme()
 
+	// If we're in scroll mode and have cached lines, use them
+	if p.helpScrollMode && len(p.helpLines) > 0 {
+		return p.renderScrollableHelp(maxLines)
+	}
+
 	// Full help content
 	fullHelpLines := []string{
 		"Commands:",
@@ -1115,12 +1235,75 @@ func (p *InputPanel) renderHelpCompact(maxLines int) string {
 		}
 	}
 
-	// Add truncation indicator if needed
-	if len(helpLines) < len(fullHelpLines) {
-		helpLines = append(helpLines, "... (resize window for full help)")
+	// Add scroll hint if we have cached help lines (indicating scrollable content)
+	if len(p.helpLines) > 0 {
+		helpLines = append(helpLines, "... (↑/↓ to scroll, Esc to exit scroll mode)")
+	} else {
+		// Add truncation indicator if needed
+		if len(helpLines) < len(fullHelpLines) {
+			helpLines = append(helpLines, "... (resize window for full help)")
+		}
 	}
 
 	helpContent := strings.Join(helpLines, "\n")
+
+	return styles.NewStyle().
+		Foreground(t.Info()).
+		Border(styles.RoundedBorder).
+		BorderForeground(t.Border()).
+		Padding(1).
+		Render(helpContent)
+}
+
+// renderScrollableHelp renders help content with scrolling support
+func (p *InputPanel) renderScrollableHelp(maxLines int) string {
+	t := theme.CurrentTheme()
+	
+	if len(p.helpLines) == 0 {
+		return ""
+	}
+
+	// Calculate how many lines we can show (accounting for border and padding)
+	availableLines := maxLines - 4 // 2 for border, 2 for padding
+	if availableLines <= 0 {
+		availableLines = 1
+	}
+
+	// Calculate the visible range
+	startLine := p.helpScrollOffset
+	endLine := min(startLine+availableLines, len(p.helpLines))
+	
+	// Ensure we don't go beyond bounds
+	if startLine >= len(p.helpLines) {
+		startLine = max(0, len(p.helpLines)-availableLines)
+		p.helpScrollOffset = startLine
+	}
+	
+	if endLine <= startLine {
+		endLine = startLine + 1
+	}
+
+	// Get the visible lines
+	visibleLines := p.helpLines[startLine:endLine]
+	
+	// Add scroll indicators
+	var scrollInfo []string
+	if startLine > 0 {
+		scrollInfo = append(scrollInfo, "▲ More content above")
+	}
+	
+	scrollInfo = append(scrollInfo, visibleLines...)
+	
+	if endLine < len(p.helpLines) {
+		scrollInfo = append(scrollInfo, "▼ More content below")
+	}
+	
+	// Add navigation hint at the bottom
+	scrollInfo = append(scrollInfo, "")
+	scrollInfo = append(scrollInfo, fmt.Sprintf("Scroll: ↑/↓ lines, PgUp/PgDn pages, Esc to exit (%d/%d)", 
+		startLine+1, len(p.helpLines)))
+
+	helpContent := strings.Join(scrollInfo, "\n")
 
 	return styles.NewStyle().
 		Foreground(t.Info()).
