@@ -680,10 +680,23 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
                 Timestamp: time.Now(),
                 Status:    "pending",
             }
-            if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
-                log.Printf("[SSE] Failed to add message: %v", err)
+            // Avoid duplicate additions if multiple message.updated events arrive for same ID
+            exists := false
+            st := orch.syncManager.GetState()
+            for _, m := range st.Messages {
+                if m.ID == msg.ID {
+                    exists = true
+                    break
+                }
+            }
+            if exists {
+                log.Printf("[SSE] Message metadata exists, skipping add: %s", msg.ID)
             } else {
-                log.Printf("[SSE] Message metadata added: %s", msg.ID)
+                if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
+                    log.Printf("[SSE] Failed to add message: %v", err)
+                } else {
+                    log.Printf("[SSE] Message metadata added: %s", msg.ID)
+                }
             }
         } else {
             log.Printf("[SSE] Unexpected union type for message.updated")
@@ -693,6 +706,11 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
         uni := evt.AsUnion()
         if v, ok := uni.(opencode.EventListResponseEventMessagePartUpdated); ok {
             part := v.Properties.Part
+            // Skip reasoning/analysis parts from streaming into visible assistant content
+            if strings.EqualFold(string(part.Type), "reasoning") || strings.EqualFold(string(part.Type), "thinking") || strings.EqualFold(string(part.Type), "analysis") {
+                log.Printf("[SSE] part.skipped id=%s type=%s len=%d (reasoning/thinking)", part.MessageID, part.Type, len(part.Text))
+                return
+            }
             // Append text to message content
             messageID := part.MessageID
             appended := part.Text
@@ -726,7 +744,25 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
                     log.Printf("[SSE] Failed to create placeholder message %s: %v", messageID, err)
                 }
             }
-            newContent := cur + appended
+            // Log diagnostic info before merging
+            prefixReplace := strings.HasPrefix(appended, cur)
+            // Compute overlap length (suffix of current vs prefix of appended)
+            max := len(cur)
+            if len(appended) < max {
+                max = len(appended)
+            }
+            overlap := 0
+            for i := 1; i <= max; i++ {
+                if strings.HasSuffix(cur, appended[:i]) {
+                    overlap = i
+                }
+            }
+            log.Printf("[SSE] part.updated id=%s type=%s cur_len=%d app_len=%d prefix_replace=%t overlap=%d app_preview=%.80q",
+                messageID, part.Type, len(cur), len(appended), prefixReplace, overlap, appended)
+
+            // Merge streaming text intelligently to avoid duplicated content
+            newContent := mergeStreamingText(cur, appended)
+            log.Printf("[SSE] part.merge   id=%s new_len=%d new_preview=%.80q", messageID, len(newContent), newContent)
 
             if err := orch.syncManager.UpdateMessage(messageID, newContent, "", "sse"); err != nil {
                 log.Printf("[SSE] Failed to append part to message %s: %v", messageID, err)
@@ -857,6 +893,37 @@ func (orch *TmuxOrchestrator) handleSSEEvent(data string) {
         // For other event types, just log for now
         log.Printf("[SSE] Unhandled event type: %s", env.Type)
     }
+}
+
+// mergeStreamingText merges an incoming streaming chunk with the current text,
+// avoiding duplicated content when updates send the full text each time.
+// Strategy:
+// - If the new chunk starts with the current text, use the new chunk (replacement).
+// - Else, find the longest overlap where the end of current matches the start of new,
+//   and append only the non-overlapping suffix.
+func mergeStreamingText(current, incoming string) string {
+    if incoming == "" {
+        return current
+    }
+    if current == "" {
+        return incoming
+    }
+    // If server sends full text repeatedly, incoming will have current as prefix
+    if strings.HasPrefix(incoming, current) {
+        return incoming
+    }
+    // Compute maximal overlap between suffix of current and prefix of incoming
+    max := len(current)
+    if len(incoming) < max {
+        max = len(incoming)
+    }
+    overlap := 0
+    for i := 1; i <= max; i++ {
+        if strings.HasSuffix(current, incoming[:i]) {
+            overlap = i
+        }
+    }
+    return current + incoming[overlap:]
 }
 
 // loadSessionsFromServer loads existing sessions from OpenCode server into local state
