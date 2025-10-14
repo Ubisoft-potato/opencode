@@ -38,6 +38,7 @@ type MessagesPanel struct {
     isStreaming      bool
     currentMessage   *types.MessageInfo
     version          int64
+    eventsChan       chan state.StateEvent
 }
 
 // NewMessagesPanel creates a new messages panel
@@ -53,24 +54,25 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
 		showTimestamps: false,
 		ctx:            ctx,
 		cancel:         cancel,
+		eventsChan:     make(chan state.StateEvent, 64),
 	}
 
-	// Register event handlers
-	panel.ipcClient.RegisterEventHandler(state.EventMessageAdded, panel.handleMessageAdded)
-	panel.ipcClient.RegisterEventHandler(state.EventMessageUpdated, panel.handleMessageUpdated)
-	panel.ipcClient.RegisterEventHandler(state.EventMessageDeleted, panel.handleMessageDeleted)
-	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.handleSessionChanged)
-	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.handleStateSync)
+    // Register event handlers (bridge IPC events into Bubble Tea loop)
+    panel.ipcClient.RegisterEventHandler(state.EventMessageAdded, panel.forwardEventToUI)
+    panel.ipcClient.RegisterEventHandler(state.EventMessageUpdated, panel.forwardEventToUI)
+    panel.ipcClient.RegisterEventHandler(state.EventMessageDeleted, panel.forwardEventToUI)
+    panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.forwardEventToUI)
+    panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.forwardEventToUI)
 
-	// Wildcard handler to log receipt of any event type for diagnostics
-	panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
+    // Wildcard handler to log receipt of any event type for diagnostics
+    panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
 
 	return panel
 }
 
 // Init initializes the panel
 func (p *MessagesPanel) Init() tea.Cmd {
-	var cmds []tea.Cmd
+    var cmds []tea.Cmd
 
 	// Connect to IPC server
 	cmds = append(cmds, func() tea.Msg {
@@ -91,8 +93,8 @@ func (p *MessagesPanel) Init() tea.Cmd {
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
-	// Start streaming updates
-	cmds = append(cmds, p.startEventStream())
+    // Subscribe to IPC events bridged via eventsChan
+    cmds = append(cmds, p.subscribeEvents())
 
 	return tea.Batch(cmds...)
 }
@@ -124,8 +126,10 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("Messages panel error: %v", msg.Error)
 		return p, nil
 
-	case MessageEventMsg:
-		return p.handleMessageEvent(msg.Event)
+    case MessageEventMsg:
+        // Handle event and continue listening for more
+        _, cmd := p.handleMessageEvent(msg.Event)
+        return p, tea.Batch(cmd, p.subscribeEvents())
 
 	case StreamingUpdateMsg:
 		return p.handleStreamingUpdate(msg)
@@ -438,19 +442,38 @@ func decodePayload[T any](data map[string]interface{}, out *T) error {
 }
 
 func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, tea.Cmd) {
-	switch event.Type {
-	case state.EventMessageAdded:
-		p.handleMessageAdded(event)
-	case state.EventMessageUpdated:
-		p.handleMessageUpdated(event)
-	case state.EventMessageDeleted:
-		p.handleMessageDeleted(event)
-	case state.EventSessionChanged:
-		p.handleSessionChanged(event)
-	case state.EventStateSync:
-		p.handleStateSync(event)
-	}
+    switch event.Type {
+    case state.EventMessageAdded:
+        p.handleMessageAdded(event)
+    case state.EventMessageUpdated:
+        p.handleMessageUpdated(event)
+    case state.EventMessageDeleted:
+        p.handleMessageDeleted(event)
+    case state.EventSessionChanged:
+        p.handleSessionChanged(event)
+    case state.EventStateSync:
+        p.handleStateSync(event)
+    }
     return p, nil
+}
+
+// forwardEventToUI bridges IPC events into Bubble Tea by pushing into eventsChan
+func (p *MessagesPanel) forwardEventToUI(event state.StateEvent) error {
+    select {
+    case p.eventsChan <- event:
+    default:
+        // Drop if channel is full to avoid blocking
+        log.Printf("messages: events channel full, dropping event %s", event.Type)
+    }
+    return nil
+}
+
+// subscribeEvents returns a command that waits for the next IPC event and emits it as a MessageEventMsg
+func (p *MessagesPanel) subscribeEvents() tea.Cmd {
+    return func() tea.Msg {
+        evt := <-p.eventsChan
+        return MessageEventMsg{Event: evt}
+    }
 }
 
 func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model, tea.Cmd) {

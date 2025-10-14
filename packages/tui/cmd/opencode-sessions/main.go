@@ -22,44 +22,47 @@ import (
 
 // SessionsPanel manages the sessions list panel
 type SessionsPanel struct {
-	client           *opencode.Client
-	ipcClient        *ipc.SocketClient
-	sessions         []types.SessionInfo
-	currentIndex     int
-	currentSessionID string
-	width            int
-	height           int
-	ctx              context.Context
-	cancel           context.CancelFunc
-	version          int64 // Store the state version directly in the model
+    client           *opencode.Client
+    ipcClient        *ipc.SocketClient
+    sessions         []types.SessionInfo
+    currentIndex     int
+    currentSessionID string
+    width            int
+    height           int
+    ctx              context.Context
+    cancel           context.CancelFunc
+    version          int64 // Store the state version directly in the model
+    eventsChan       chan types.StateEvent
 }
 
 // NewSessionsPanel creates a new sessions panel
 func NewSessionsPanel(httpClient *opencode.Client, socketPath string) *SessionsPanel {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	panel := &SessionsPanel{
-		client:       httpClient,
-		ipcClient:    ipc.NewSocketClient(socketPath, "sessions-panel", "sessions"),
-		sessions:     make([]types.SessionInfo, 0),
-		currentIndex: 0,
-		ctx:          ctx,
-		cancel:       cancel,
-	}
+panel := &SessionsPanel{
+    client:       httpClient,
+    ipcClient:    ipc.NewSocketClient(socketPath, "sessions-panel", "sessions"),
+    sessions:     make([]types.SessionInfo, 0),
+    currentIndex: 0,
+    ctx:          ctx,
+    cancel:       cancel,
+    eventsChan:   make(chan types.StateEvent, 64),
+}
 
 	// Register event handlers
-	panel.ipcClient.RegisterEventHandler(types.EventSessionAdded, panel.handleSessionAdded)
-	panel.ipcClient.RegisterEventHandler(types.EventSessionDeleted, panel.handleSessionDeleted)
-	panel.ipcClient.RegisterEventHandler(types.EventSessionUpdated, panel.handleSessionUpdated)
-	panel.ipcClient.RegisterEventHandler(types.EventSessionChanged, panel.handleSessionChanged)
-	panel.ipcClient.RegisterEventHandler(types.EventStateSync, panel.handleStateSync)
+    // Bridge IPC session events into Bubble Tea loop to force immediate UI refresh
+    panel.ipcClient.RegisterEventHandler(types.EventSessionAdded, panel.forwardSessionEventToUI)
+    panel.ipcClient.RegisterEventHandler(types.EventSessionDeleted, panel.forwardSessionEventToUI)
+    panel.ipcClient.RegisterEventHandler(types.EventSessionUpdated, panel.forwardSessionEventToUI)
+    panel.ipcClient.RegisterEventHandler(types.EventSessionChanged, panel.forwardSessionEventToUI)
+    panel.ipcClient.RegisterEventHandler(types.EventStateSync, panel.forwardSessionEventToUI)
 
 	return panel
 }
 
 // Init initializes the panel
 func (p *SessionsPanel) Init() tea.Cmd {
-	var cmds []tea.Cmd
+    var cmds []tea.Cmd
 
 	// Connect to IPC server
 	cmds = append(cmds, func() tea.Msg {
@@ -81,7 +84,10 @@ func (p *SessionsPanel) Init() tea.Cmd {
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
-	return tea.Batch(cmds...)
+    // Subscribe to IPC events bridged via eventsChan
+    cmds = append(cmds, p.subscribeSessionEvents())
+    return tea.Batch(cmds...)
+
 }
 
 // expectedVersion returns a safe ExpectedVersion for updates.
@@ -125,8 +131,9 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("Sessions panel error: %v", msg.Error)
 		return p, nil
 
-	case SessionEventMsg:
-		return p.handleSessionEvent(msg.Event)
+    case SessionEventMsg:
+        _, cmd := p.handleSessionEvent(msg.Event)
+        return p, tea.Batch(cmd, p.subscribeSessionEvents())
 
 	default:
 		return p, nil
@@ -399,6 +406,24 @@ func (p *SessionsPanel) handleSessionEvent(event types.StateEvent) (tea.Model, t
 		p.handleStateSync(event)
 	}
 	return p, nil
+}
+
+// forwardSessionEventToUI bridges IPC session events into Bubble Tea by pushing into eventsChan
+func (p *SessionsPanel) forwardSessionEventToUI(event types.StateEvent) error {
+    select {
+    case p.eventsChan <- event:
+    default:
+        log.Printf("sessions: events channel full, dropping event %s", event.Type)
+    }
+    return nil
+}
+
+// subscribeSessionEvents returns a command that waits for the next IPC event and emits it as a SessionEventMsg
+func (p *SessionsPanel) subscribeSessionEvents() tea.Cmd {
+    return func() tea.Msg {
+        evt := <-p.eventsChan
+        return SessionEventMsg{Event: evt}
+    }
 }
 
 // updateCurrentIndex updates the current index based on current session ID

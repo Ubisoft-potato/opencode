@@ -535,15 +535,15 @@ func main() {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		log.Fatalf("Failed to create log directory: %v", err)
 	}
-	logPath := filepath.Join(logDir, "input.log")
+	logPath := filepath.Join(logDir, "tmux.log")
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatalf("Failed to open log file: %v", err)
 	}else{
-   defer logFile.Close()
+	  log.SetOutput(logFile)
+  	log.SetFlags(log.LstdFlags | log.Lshortfile)
+    defer logFile.Close()
 	}
-	log.SetOutput(logFile)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 
 	// Parse command line arguments
