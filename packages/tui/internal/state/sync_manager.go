@@ -305,24 +305,20 @@ func (manager *PanelSyncManager) ChangeAgent(agent string, panelID string) error
 
 // applyUpdateWithEvents applies an update and broadcasts events
 func (manager *PanelSyncManager) applyUpdateWithEvents(update types.StateUpdate) error {
-	// Apply update with conflict resolution
-	result := manager.conflictResolver.ResolveConflict(manager, update)
-	if !result.Success {
-		manager.metrics.RecordUpdate(update.Type, false, result.TimeTaken)
-		return result.Error
-	}
+    // Apply update with conflict resolution
+    result := manager.conflictResolver.ResolveConflict(manager, update)
+    if !result.Success {
+        manager.metrics.RecordUpdate(update.Type, false, result.TimeTaken)
+        return result.Error
+    }
 
-	manager.metrics.RecordUpdate(update.Type, true, result.TimeTaken)
+    manager.metrics.RecordUpdate(update.Type, true, result.TimeTaken)
 
-	// Create and broadcast event
-	event := CreateEventFromUpdate(update, manager.state.GetCurrentVersion())
-	manager.eventBus.Broadcast(event)
-
-	// Queue save operation if auto-save is enabled
-	if manager.autoSaveEnabled {
-		select {
-		case manager.saveQueue <- saveRequest{state: manager.state.Clone(), callback: nil}:
-			// Save queued successfully
+    // Queue save operation if auto-save is enabled
+    if manager.autoSaveEnabled {
+        select {
+        case manager.saveQueue <- saveRequest{state: manager.state.Clone(), callback: nil}:
+            // Save queued successfully
 		default:
 			// Save queue full, log warning
 			log.Printf("Save queue full, skipping auto-save for update %s", update.Type)
@@ -395,44 +391,18 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		if err := decodePayload(update.Payload, &payload); err != nil {
 			return err
 		}
-		// Deduplicate by Message.ID: if exists, update instead of append
-		existingIdx := -1
-		for i := range manager.state.Messages {
-			if manager.state.Messages[i].ID == payload.Message.ID {
-				existingIdx = i
+		// Append message to state
+		manager.state.Messages = append(manager.state.Messages, payload.Message)
+		// Update session message count if session exists
+		for i := range manager.state.Sessions {
+			if manager.state.Sessions[i].ID == payload.Message.SessionID {
+				manager.state.Sessions[i].MessageCount++
 				break
 			}
 		}
-		if existingIdx >= 0 {
-			// Update existing message fields conservatively
-			if payload.Message.Content != "" {
-				manager.state.Messages[existingIdx].Content = payload.Message.Content
-			}
-			if payload.Message.Status != "" {
-				manager.state.Messages[existingIdx].Status = payload.Message.Status
-			}
-			if payload.Message.Parts != nil {
-				manager.state.Messages[existingIdx].Parts = payload.Message.Parts
-			}
-			// Keep session and type as-is; refresh timestamp
-			manager.state.Messages[existingIdx].Timestamp = time.Now()
-			// Do not bump session message count for duplicate add
-			msg := manager.state.Messages[existingIdx]
-			manager.state.CurrentMessage = &msg
-		} else {
-			// Append new message to state
-			manager.state.Messages = append(manager.state.Messages, payload.Message)
-			// Update session message count if session exists
-			for i := range manager.state.Sessions {
-				if manager.state.Sessions[i].ID == payload.Message.SessionID {
-					manager.state.Sessions[i].MessageCount++
-					break
-				}
-			}
-			// Set current message pointer
-			msg := payload.Message
-			manager.state.CurrentMessage = &msg
-		}
+		// Set current message pointer
+		msg := payload.Message
+		manager.state.CurrentMessage = &msg
 
 	case types.MessageUpdated:
 		var payload types.MessageUpdatePayload

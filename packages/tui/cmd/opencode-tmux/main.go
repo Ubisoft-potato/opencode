@@ -696,22 +696,10 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
                 if info.Role == opencode.MessageRoleUser {
                     desiredStatus = "completed"
                 }
-                // Avoid redundant status updates if unchanged
-                currentStatus := ""
-                for _, m := range st.Messages {
-                    if m.ID == msg.ID {
-                        currentStatus = m.Status
-                        break
-                    }
-                }
-                if currentStatus != desiredStatus {
-                    if err := orch.syncManager.UpdateMessage(msg.ID, "", desiredStatus, "sse"); err != nil {
-                        log.Printf("[SSE] Failed to refresh message status for %s: %v", msg.ID, err)
-                    } else {
-                        log.Printf("[SSE] Message metadata exists; status refreshed: %s -> %s", msg.ID, desiredStatus)
-                    }
+                if err := orch.syncManager.UpdateMessage(msg.ID, "", desiredStatus, "sse"); err != nil {
+                    log.Printf("[SSE] Failed to refresh message status for %s: %v", msg.ID, err)
                 } else {
-                    log.Printf("[SSE] Message metadata exists; status unchanged: %s (%s)", msg.ID, currentStatus)
+                    log.Printf("[SSE] Message metadata exists; status refreshed: %s -> %s", msg.ID, desiredStatus)
                 }
             } else {
                 if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {

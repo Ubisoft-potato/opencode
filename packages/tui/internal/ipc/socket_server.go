@@ -1,19 +1,18 @@
 package ipc
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net"
-	"os"
-	"path/filepath"
-	"sync"
-	"time"
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net"
+    "os"
+    "path/filepath"
+    "sync"
+    "time"
 
-	"github.com/sst/opencode/internal/interfaces"
-	"github.com/sst/opencode/internal/state"
-	"github.com/sst/opencode/internal/types"
+    "github.com/sst/opencode/internal/interfaces"
+    "github.com/sst/opencode/internal/types"
 )
 
 // SocketServer manages Unix Domain Socket server for inter-panel communication
@@ -314,25 +313,22 @@ func (server *SocketServer) handleStateUpdate(clientConn *ClientConnection, mess
 
 	update.SourcePanel = clientConn.PanelID
 
-	err := server.stateManager.UpdateWithVersionCheck(update)
-	if err != nil {
-		log.Printf("Failed to apply state update: %v", err)
-		server.sendErrorMessage(clientConn, "state_update_error", err.Error(), message.RequestID)
-		return
-	}
+    err := server.stateManager.UpdateWithVersionCheck(update)
+    if err != nil {
+        log.Printf("Failed to apply state update: %v", err)
+        server.sendErrorMessage(clientConn, "state_update_error", err.Error(), message.RequestID)
+        return
+    }
 
-	event := state.CreateEventFromUpdate(update, server.stateManager.GetState().GetCurrentVersion())
-	server.eventBus.Broadcast(event)
-
-	response := IPCMessage{
-		Type:      "state_update_response",
-		RequestID: message.RequestID,
-		Data: map[string]interface{}{
-			"success": true,
-			"version": server.stateManager.GetState().GetCurrentVersion(),
-		},
-		Timestamp: time.Now(),
-	}
+    response := IPCMessage{
+        Type:      "state_update_response",
+        RequestID: message.RequestID,
+        Data: map[string]interface{}{
+            "success": true,
+            "version": server.stateManager.GetState().GetCurrentVersion(),
+        },
+        Timestamp: time.Now(),
+    }
 	log.Printf("[SERVER] Sending state_update_response id=%s version=%d to panel=%s", message.RequestID, server.stateManager.GetState().GetCurrentVersion(), clientConn.PanelID)
 	if err := clientConn.send(response); err != nil {
 		log.Printf("Failed to send state update success response: %v", err)
