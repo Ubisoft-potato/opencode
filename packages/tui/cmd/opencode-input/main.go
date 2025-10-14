@@ -555,38 +555,14 @@ func (p *InputPanel) sendMessage() tea.Cmd {
 		return nil
 	}
 
-	return func() tea.Msg {
-		// Add to history
-		p.addToHistory(message)
+    return func() tea.Msg {
+        // Add to history
+        p.addToHistory(message)
 
-		// Create message info
-		messageInfo := types.MessageInfo{
-			ID:        fmt.Sprintf("msg_%d", time.Now().UnixNano()),
-			SessionID: p.currentSessionID,
-			Type:      "user",
-			Content:   message,
-			Timestamp: time.Now(),
-			Status:    "completed",
-		}
-
-		// Send state update
-        update := types.StateUpdate{
-            Type:            types.MessageAdded,
-            Payload:         types.MessageAddPayload{Message: messageInfo},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
-
-		// Perform API call in background so UI remains responsive
-		go func(sessionID, userMsg string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+        // Perform API call in background so UI remains responsive
+        go func(sessionID, userMsg string) {
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+            defer cancel()
 
 			response, err := p.client.Session.Prompt(ctx, sessionID, opencode.SessionPromptParams{
 				Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
@@ -602,60 +578,24 @@ func (p *InputPanel) sendMessage() tea.Cmd {
 				return
 			}
 
-			log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
+            log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
 
-			// Create assistant message from response
-			if response != nil {
-				// Check for errors in the response
-				if response.Info.Error.Name != "" {
-					log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
-					return
-				}
+            // Create assistant message from response
+            if response != nil {
+                // Check for errors in the response
+                if response.Info.Error.Name != "" {
+                    log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
+                    return
+                }
 
-				assistantMessage := types.MessageInfo{
-					ID:        response.Info.ID, // Use the actual message ID from response
-					SessionID: sessionID,
-					Type:      "assistant",
-					Content:   "", // Will be populated from response parts
-					Timestamp: time.Now(),
-					Status:    "completed",
-				}
-
-				// Extract content from response parts
-				if len(response.Parts) > 0 {
-					var contentParts []string
-					for _, part := range response.Parts {
-						// Filter for text parts and skip synthetic parts
-						if part.Type == opencode.PartTypeText && !part.Synthetic {
-							if strings.TrimSpace(part.Text) != "" {
-								contentParts = append(contentParts, part.Text)
-							}
-						}
-					}
-					assistantMessage.Content = strings.Join(contentParts, "\n")
-				}
-
-				// Send assistant message state update
-            assistantUpdate := types.StateUpdate{
-                Type:            types.MessageAdded,
-                Payload:         types.MessageAddPayload{Message: assistantMessage},
-                SourcePanel:     "input-panel",
-                Timestamp:       time.Now(),
-                ExpectedVersion: p.expectedVersion(),
+                // Do not add assistant message from input panel.
+                // The SSE orchestrator will add and stream-update messages to avoid duplicates.
             }
+        }(p.currentSessionID, message)
 
-            if newVersion, err := p.sendUpdateWithRetry(assistantUpdate); err != nil {
-                log.Printf("[INPUT] Failed to send assistant message state update: %v", err)
-            } else {
-                p.version = newVersion
-                log.Printf("[INPUT] Successfully added assistant response to state")
-            }
-			}
-		}(p.currentSessionID, message)
-
-		// Immediately clear input buffer in UI
-		return MessageSentMsg{Message: messageInfo}
-	}
+        // Immediately clear input buffer in UI
+        return MessageSentMsg{}
+    }
 }
 
 // addToHistory adds a message to the history

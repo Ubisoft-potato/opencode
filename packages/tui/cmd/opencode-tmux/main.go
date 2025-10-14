@@ -678,7 +678,8 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
                 Type:      string(info.Role),
                 Content:   "",
                 Timestamp: time.Now(),
-                Status:    "pending",
+                // User messages are immediately completed; assistant starts pending
+                Status:    func() string { if info.Role == opencode.MessageRoleUser { return "completed" } ; return "pending" }(),
             }
             // Avoid duplicate additions if multiple message.updated events arrive for same ID
             exists := false
@@ -690,7 +691,16 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
                 }
             }
             if exists {
-                log.Printf("[SSE] Message metadata exists, skipping add: %s", msg.ID)
+                // Update status based on role in case placeholder was created earlier
+                desiredStatus := "pending"
+                if info.Role == opencode.MessageRoleUser {
+                    desiredStatus = "completed"
+                }
+                if err := orch.syncManager.UpdateMessage(msg.ID, "", desiredStatus, "sse"); err != nil {
+                    log.Printf("[SSE] Failed to refresh message status for %s: %v", msg.ID, err)
+                } else {
+                    log.Printf("[SSE] Message metadata exists; status refreshed: %s -> %s", msg.ID, desiredStatus)
+                }
             } else {
                 if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
                     log.Printf("[SSE] Failed to add message: %v", err)
@@ -709,6 +719,15 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
             // Skip reasoning/analysis parts from streaming into visible assistant content
             if strings.EqualFold(string(part.Type), "reasoning") || strings.EqualFold(string(part.Type), "thinking") || strings.EqualFold(string(part.Type), "analysis") {
                 log.Printf("[SSE] part.skipped id=%s type=%s len=%d (reasoning/thinking)", part.MessageID, part.Type, len(part.Text))
+                return
+            }
+            // Mark message as completed when step-finish part arrives
+            if part.Type == opencode.PartTypeStepFinish {
+                if err := orch.syncManager.UpdateMessage(part.MessageID, "", "completed", "sse"); err != nil {
+                    log.Printf("[SSE] Failed to mark completed for message %s: %v", part.MessageID, err)
+                } else {
+                    log.Printf("[SSE] message.completed id=%s", part.MessageID)
+                }
                 return
             }
             // Append text to message content
