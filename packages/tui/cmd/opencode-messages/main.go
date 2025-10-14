@@ -283,9 +283,27 @@ func (p *MessagesPanel) handleMessageAdded(event state.StateEvent) error {
         var payload types.MessageAddPayload
         if err := decodePayload(payloadMap, &payload); err == nil {
             if payload.Message.SessionID == p.currentSessionID {
-                p.messages = append(p.messages, payload.Message)
-                if p.autoScroll {
-                    p.scrollToBottom()
+                // Deduplicate by ID: update existing entry instead of appending
+                existingIdx := -1
+                for i, m := range p.messages {
+                    if m.ID == payload.Message.ID {
+                        existingIdx = i
+                        break
+                    }
+                }
+                if existingIdx >= 0 {
+                    if payload.Message.Content != "" {
+                        p.messages[existingIdx].Content = payload.Message.Content
+                    }
+                    if payload.Message.Status != "" {
+                        p.messages[existingIdx].Status = payload.Message.Status
+                    }
+                    p.messages[existingIdx].Timestamp = time.Now()
+                } else {
+                    p.messages = append(p.messages, payload.Message)
+                    if p.autoScroll {
+                        p.scrollToBottom()
+                    }
                 }
             }
             log.Printf("[MESSAGES] v%v Message added: %s", event.Version, payload.Message.ID)
