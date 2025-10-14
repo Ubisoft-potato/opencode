@@ -168,9 +168,10 @@ func (client *SocketClient) sendRequestAndWait(message *IPCMessage, timeout time
 	}
 	client.connectionMux.RUnlock()
 
-	// Generate a unique request ID
-	requestID := uuid.New().String()
-	message.RequestID = requestID
+    // Generate a unique request ID
+    requestID := uuid.New().String()
+    message.RequestID = requestID
+    log.Printf("[CLIENT] Sending request type=%s id=%s", message.Type, requestID)
 
 	// Create a response channel for this specific request
 	respChan := make(chan IPCMessage, 1)
@@ -197,15 +198,17 @@ func (client *SocketClient) sendRequestAndWait(message *IPCMessage, timeout time
     }
 
 	// Wait for the response or timeout
-	select {
-	case response, ok := <-respChan:
-		if !ok {
-			return nil, fmt.Errorf("response channel closed unexpectedly for request %s", requestID)
-		}
-		return &response, nil
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timeout waiting for response for request %s", requestID)
-	}
+    select {
+    case response, ok := <-respChan:
+        if !ok {
+            return nil, fmt.Errorf("response channel closed unexpectedly for request %s", requestID)
+        }
+        log.Printf("[CLIENT] Received response type=%s id=%s", response.Type, requestID)
+        return &response, nil
+    case <-time.After(timeout):
+        log.Printf("[CLIENT] Timeout waiting for response id=%s type=%s", requestID, message.Type)
+        return nil, fmt.Errorf("timeout waiting for response for request %s", requestID)
+    }
 }
 
 // RequestState requests the current state from the server using the new sync mechanism.

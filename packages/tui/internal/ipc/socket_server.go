@@ -333,6 +333,7 @@ func (server *SocketServer) handleStateUpdate(clientConn *ClientConnection, mess
 		},
 		Timestamp: time.Now(),
 	}
+	log.Printf("[SERVER] Sending state_update_response id=%s version=%d to panel=%s", message.RequestID, server.stateManager.GetState().GetCurrentVersion(), clientConn.PanelID)
 	if err := clientConn.send(response); err != nil {
 		log.Printf("Failed to send state update success response: %v", err)
 	}

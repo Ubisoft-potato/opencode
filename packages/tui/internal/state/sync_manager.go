@@ -334,11 +334,16 @@ func (manager *PanelSyncManager) applyUpdateWithEvents(update types.StateUpdate)
 
 // UpdateWithVersionCheck applies a state update with optimistic locking
 func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate) error {
+    // Acquire lock to perform version check and apply updates atomically.
+    // IMPORTANT: Do NOT hold the lock while invoking the conflict resolver,
+    // which calls UpdateWithVersionCheck again and would deadlock.
     manager.syncMutex.Lock()
-    defer manager.syncMutex.Unlock()
 
     // Check for version conflicts (optimistic locking)
     if manager.state.Version.Version != update.ExpectedVersion {
+        // Release lock before invoking resolver to avoid re-entrant deadlock.
+        manager.syncMutex.Unlock()
+
         // Attempt to resolve the conflict using the configured resolver
         if manager.conflictResolver != nil {
             result := manager.conflictResolver.ResolveConflict(manager, update)
@@ -351,8 +356,11 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
         }
 
         return fmt.Errorf("version conflict: expected %d, current %d",
-            update.ExpectedVersion, manager.state.Version.Version)
+            update.ExpectedVersion, manager.GetState().GetCurrentVersion())
     }
+
+    // No conflict: ensure we unlock on all return paths below
+    defer manager.syncMutex.Unlock()
 
 	// Apply the update based on its type
 	switch update.Type {
@@ -497,11 +505,11 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 	manager.state.LastUpdate = time.Now()
 	manager.state.UpdateCount++
 
-	// Create and broadcast event
-	event := CreateEventFromUpdate(update, manager.state.Version.Version)
-	manager.eventBus.Broadcast(event)
+    // Create and broadcast event
+    event := CreateEventFromUpdate(update, manager.state.Version.Version)
+    manager.eventBus.Broadcast(event)
 
-	return nil
+    return nil
 }
 
 
