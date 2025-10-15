@@ -583,15 +583,22 @@ func (p *SessionsPanel) renderSessionsList() string {
 		isCurrent := session.ID == p.currentSessionID
 
 		var style styles.Style
+		var prefix string
+		
 		if isSelected {
+			// 样式选项2: 反色高亮（类似传统终端选择）
 			style = styles.NewStyle().
-				Background(t.BackgroundElement()).
-				Foreground(t.Text()).
+				Background(t.Primary()).
+				Foreground(t.Background()).
+				Bold(true).
 				Padding(0, 1)
+			prefix = ""
 		} else {
+			// 未选中项目使用普通样式
 			style = styles.NewStyle().
-				Foreground(t.Text()).
+				Foreground(t.TextMuted()).
 				Padding(0, 1)
+			prefix = ""
 		}
 
 		var indicator string
@@ -606,7 +613,7 @@ func (p *SessionsPanel) renderSessionsList() string {
 			title = fmt.Sprintf("Session %s", session.ID[:8])
 		}
 
-		sessionLine := fmt.Sprintf("%s%s (%d msgs)", indicator, title, session.MessageCount)
+		sessionLine := fmt.Sprintf("%s%s%s (%d msgs)", prefix, indicator, title, session.MessageCount)
 		content += style.Render(sessionLine) + "\n"
 	}
 

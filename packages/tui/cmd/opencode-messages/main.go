@@ -632,16 +632,44 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 
 	switch message.Type {
 	case "user":
-		style = styles.NewStyle().Foreground(t.Success())
-		prefix = "You: "
+		// User messages: light background with dark text for better readability
+		style = styles.NewStyle().
+			Background(t.BackgroundElement()).
+			Foreground(t.Text()).
+			Padding(1, 2).
+			MarginBottom(1).
+			BorderLeft(true).
+			BorderStyle(styles.NormalBorder).
+			BorderLeftForeground(t.Success())
+		prefix = "🧑 You: "
 	case "assistant":
-		style = styles.NewStyle().Foreground(t.Info())
-		prefix = "Assistant: "
+		// Assistant messages: slightly different background with accent color
+		style = styles.NewStyle().
+			Background(t.BackgroundPanel()).
+			Foreground(t.Text()).
+			Padding(1, 2).
+			MarginBottom(1).
+			BorderLeft(true).
+			BorderStyle(styles.NormalBorder).
+			BorderLeftForeground(t.Info())
+		prefix = "🤖 Assistant: "
 	case "system":
-		style = styles.NewStyle().Foreground(t.Warning())
-		prefix = "System: "
+		// System messages: warning style
+		style = styles.NewStyle().
+			Background(t.BackgroundElement()).
+			Foreground(t.Warning()).
+			Padding(1, 2).
+			MarginBottom(1).
+			BorderLeft(true).
+			BorderStyle(styles.NormalBorder).
+			BorderLeftForeground(t.Warning())
+		prefix = "⚙️ System: "
 	default:
-		style = styles.NewStyle().Foreground(t.Text())
+		style = styles.NewStyle().
+			Background(t.BackgroundElement()).
+			Foreground(t.Text()).
+			Padding(1, 2).
+			MarginBottom(1)
 		prefix = fmt.Sprintf("%s: ", message.Type)
 	}
 

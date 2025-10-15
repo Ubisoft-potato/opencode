@@ -1,9 +1,9 @@
 {
   "$schema": "https://opencode.ai/theme.json",
   "defs": {
-    "darkStep1": "#0a0a0a",
-    "darkStep2": "#141414",
-    "darkStep3": "#1e1e1e",
+    "darkStep1": "#1a1a1a",
+    "darkStep2": "#2d2d2d",
+    "darkStep3": "#404040",
     "darkStep4": "#282828",
     "darkStep5": "#323232",
     "darkStep6": "#3c3c3c",
@@ -11,8 +11,8 @@
     "darkStep8": "#606060",
     "darkStep9": "#fab283",
     "darkStep10": "#ffc09f",
-    "darkStep11": "#808080",
-    "darkStep12": "#eeeeee",
+    "darkStep11": "#c0c0c0",
+    "darkStep12": "#f0f0f0",
     "darkSecondary": "#5c9cf5",
     "darkAccent": "#9d7cd8",
     "darkRed": "#e06c75",
