@@ -194,6 +194,13 @@ func (orch *TmuxOrchestrator) initializeStateManagement() error {
 	syncManagerConfig := state.DefaultSyncManagerConfig()
 	orch.syncManager = state.NewPanelSyncManager(sharedState, fileManager, eventBus, conflictResolver, syncManagerConfig)
 
+	// Create event channel for local state changes
+	eventChan := make(chan types.StateEvent, 100)
+	eventBus.Subscribe("tmux-orchestrator", "orchestrator", eventChan)
+	
+	// Start goroutine to handle events
+	go orch.handleEvents(eventChan)
+
 	// Initialize sync manager
 	if err := orch.syncManager.Initialize(); err != nil {
 		return err
@@ -213,6 +220,43 @@ func (orch *TmuxOrchestrator) initializeStateManagement() error {
 	log.Printf("State details - SessionID: %s, Theme: %s, UpdateCount: %d",
 		testState.CurrentSessionID, testState.Theme, testState.UpdateCount)
 
+	return nil
+}
+
+// handleLocalSessionChanged handles local session change events from panels
+func (orch *TmuxOrchestrator) handleEvents(eventChan chan types.StateEvent) {
+	for event := range eventChan {
+		switch event.Type {
+		case types.EventSessionChanged:
+			if err := orch.handleLocalSessionChanged(event); err != nil {
+				log.Printf("Error handling local session change: %v", err)
+			}
+		default:
+			// Handle other event types if needed
+			log.Printf("Received event: %s from panel %s", event.Type, event.SourcePanel)
+		}
+	}
+}
+
+func (orch *TmuxOrchestrator) handleLocalSessionChanged(event types.StateEvent) error {
+	log.Printf("[TMUX] Handling local session change event: %+v", event)
+	
+	// Extract session ID from the event payload
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.SessionChangePayload
+		if sessionIDRaw, exists := payloadMap["session_id"]; exists {
+			if sessionID, ok := sessionIDRaw.(string); ok {
+				payload.SessionID = sessionID
+				log.Printf("[TMUX] Session changed to: %s", payload.SessionID)
+				
+				// The state has already been updated by the sync manager
+				// We just need to log this for debugging purposes
+				return nil
+			}
+		}
+	}
+	
+	log.Printf("[TMUX] Failed to extract session ID from event payload")
 	return nil
 }
 

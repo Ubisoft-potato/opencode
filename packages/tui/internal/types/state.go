@@ -267,6 +267,20 @@ func (s *SharedApplicationState) AddSession(session SessionInfo) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// Check if session already exists to prevent duplicates
+	for i, existingSession := range s.Sessions {
+		if existingSession.ID == session.ID {
+			// Update existing session with new data
+			s.Sessions[i] = session
+			s.Version.Version++
+			s.Version.Timestamp = time.Now()
+			s.LastUpdate = time.Now()
+			s.UpdateCount++
+			return
+		}
+	}
+
+	// Add new session if it doesn't exist
 	s.Sessions = append(s.Sessions, session)
 	s.Version.Version++
 	s.Version.Timestamp = time.Now()
