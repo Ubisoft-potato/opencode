@@ -44,6 +44,7 @@ type InputPanel struct {
 	lastCommand      string
     version          int64
     cachedState      *state.SharedApplicationState // Cache the state locally
+    program          *tea.Program // Reference to the program for triggering updates
 	// Scroll state for help content
 	helpScrollOffset int    // Current scroll position in help content
 	helpScrollMode   bool   // Whether we're in help scroll mode
@@ -111,20 +112,34 @@ func (p *InputPanel) Init() tea.Cmd {
 		return ErrorMsg{Error: fmt.Errorf("failed to connect to IPC after 3 attempts: %w", lastErr)}
 	})
 
-	// Request initial state with better error handling
+	// Request initial state and preload all sessions
 	cmds = append(cmds, func() tea.Msg {
 		// Wait longer for connection to establish
 		time.Sleep(500 * time.Millisecond)
 
-		log.Printf("[INPUT] Requesting initial state from IPC server")
+		log.Printf("[INPUT] Requesting initial state and preloading sessions")
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
-			log.Printf("[INPUT] Successfully loaded initial state")
+			log.Printf("[INPUT] Successfully loaded initial state with %d sessions", len(currentState.Sessions))
+			
+			// Preload all session information
+			sessionCount := len(currentState.Sessions)
+			log.Printf("[INPUT] Preloaded %d sessions for instant access", sessionCount)
+			
 			return StateLoadedMsg{State: currentState}
 		} else {
 			log.Printf("[INPUT] Failed to load initial state: %v", err)
 			// Don't treat this as fatal - continue with empty state
 			return StateLoadedMsg{State: nil}
 		}
+	})
+
+	// Add preload completion notification
+	cmds = append(cmds, func() tea.Msg {
+		time.Sleep(600 * time.Millisecond) // Wait for state to be loaded
+		if p.cachedState != nil {
+			return PreloadCompletedMsg{SessionCount: len(p.cachedState.Sessions)}
+		}
+		return PreloadCompletedMsg{SessionCount: 0}
 	})
 
 	return tea.Batch(cmds...)
@@ -180,6 +195,58 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.mode = "normal"
 			p.history = make([]string, 0)
 			p.historyIndex = -1
+		}
+		return p, nil
+
+	case PreloadCompletedMsg:
+		log.Printf("[INPUT] Preload completed with %d sessions", msg.SessionCount)
+		return p, nil
+
+	case TitleUpdatedMsg:
+		if msg.SessionID == p.currentSessionID {
+			p.currentSessionTitle = msg.Title
+			log.Printf("[INPUT] Title updated for session %s: %s", msg.SessionID, msg.Title)
+		}
+		return p, nil
+
+	case SessionSyncMsg:
+		log.Printf("[INPUT] Session sync received with %d sessions", len(msg.Sessions))
+		// Update cached state if we have one
+		if p.cachedState != nil {
+			p.cachedState.Sessions = msg.Sessions
+			p.cachedState.CurrentSessionID = msg.CurrentSessionID
+			if msg.Version > p.version {
+				p.version = msg.Version
+			}
+		}
+		// Update current session info if it changed
+		if msg.CurrentSessionID != p.currentSessionID {
+			p.currentSessionID = msg.CurrentSessionID
+			// Find and update session title
+			for _, session := range msg.Sessions {
+				if session.ID == p.currentSessionID {
+					p.currentSessionTitle = session.Title
+					break
+				}
+			}
+		}
+		return p, nil
+
+	case SessionUpdatedMsg:
+		log.Printf("[INPUT] Session updated: %s", msg.Session.ID)
+		// Update cached state if this is our current session
+		if msg.Session.ID == p.currentSessionID && msg.Session.Title != p.currentSessionTitle {
+			p.currentSessionTitle = msg.Session.Title
+			log.Printf("[INPUT] Current session title updated to: %s", p.currentSessionTitle)
+		}
+		// Update in cached sessions list
+		if p.cachedState != nil {
+			for i, session := range p.cachedState.Sessions {
+				if session.ID == msg.Session.ID {
+					p.cachedState.Sessions[i] = msg.Session
+					break
+				}
+			}
 		}
 		return p, nil
 
@@ -724,6 +791,12 @@ func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
             if sessionInfo, found := p.getSessionInfo(p.currentSessionID); found {
                 p.currentSessionTitle = sessionInfo.Title
                 log.Printf("[INPUT] Session changed from %s to %s, title updated to '%s' (from cache), version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
+                // Trigger immediate UI update
+                if p.program != nil {
+                    go func() {
+                        p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: sessionInfo.Title})
+                    }()
+                }
             } else {
                 // If not found in cache, use a fallback title and update asynchronously
                 p.currentSessionTitle = fmt.Sprintf("Session %s", p.currentSessionID[:8])
@@ -734,9 +807,12 @@ func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
                     if currentState, err := p.ipcClient.RequestState(); err == nil {
                         p.cachedState = currentState // Update cache
                         if sessionInfo, found := currentState.GetSessionByID(p.currentSessionID); found {
-                            // Update title in background - this will be reflected in next render
+                            // Update title in background and trigger UI update
                             p.currentSessionTitle = sessionInfo.Title
                             log.Printf("[INPUT] Async title update: session %s title set to '%s'", p.currentSessionID, p.currentSessionTitle)
+                            if p.program != nil {
+                                p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: sessionInfo.Title})
+                            }
                         }
                     } else {
                         log.Printf("[INPUT] Async state request failed: %v", err)
@@ -756,29 +832,51 @@ func (p *InputPanel) handleStateSync(event types.StateEvent) error {
     if payloadMap, ok := event.Data.(map[string]interface{}); ok {
         var payload types.StateSyncPayload
         if err := decodePayload(payloadMap, &payload); err == nil {
-            // Cache the state locally
-            p.cachedState = payload.State
-            
-            p.currentSessionID = payload.State.CurrentSessionID
-            p.buffer = payload.State.Input.Buffer
-            p.cursorPosition = payload.State.Input.CursorPosition
-            p.selectionStart = payload.State.Input.SelectionStart
-            p.selectionEnd = payload.State.Input.SelectionEnd
-            p.mode = payload.State.Input.Mode
-            p.history = payload.State.Input.History
-            p.historyIndex = payload.State.Input.HistoryIndex
-            p.version = payload.State.Version.Version
-            
-            // Update session title when we receive state sync
-            if sessionInfo, found := payload.State.GetSessionByID(p.currentSessionID); found {
-                p.currentSessionTitle = sessionInfo.Title
-                log.Printf("[INPUT] State sync: updated session title to '%s' for session %s", p.currentSessionTitle, p.currentSessionID)
+            // Update cached state with smart invalidation
+            if p.cachedState == nil || payload.State.Version.Version > p.version {
+                p.cachedState = payload.State
+                p.version = payload.State.Version.Version
+                log.Printf("[INPUT] Cache updated to version %d", p.version)
+                
+                p.currentSessionID = payload.State.CurrentSessionID
+                p.buffer = payload.State.Input.Buffer
+                p.cursorPosition = payload.State.Input.CursorPosition
+                p.selectionStart = payload.State.Input.SelectionStart
+                p.selectionEnd = payload.State.Input.SelectionEnd
+                p.mode = payload.State.Input.Mode
+                p.history = payload.State.Input.History
+                p.historyIndex = payload.State.Input.HistoryIndex
+                
+                // Update session title when we receive state sync
+                if sessionInfo, found := payload.State.GetSessionByID(p.currentSessionID); found {
+                    oldTitle := p.currentSessionTitle
+                    p.currentSessionTitle = sessionInfo.Title
+                    log.Printf("[INPUT] Session title updated from '%s' to '%s' via state sync", oldTitle, p.currentSessionTitle)
+                    
+                    // Trigger UI update if title changed
+                    if oldTitle != p.currentSessionTitle && p.program != nil {
+                        go func() {
+                            p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: p.currentSessionTitle})
+                        }()
+                    }
+                } else {
+                    // Session not found, clear title
+                    if p.currentSessionTitle != "" {
+                        p.currentSessionTitle = ""
+                        log.Printf("[INPUT] Session %s not found in state sync, title cleared", p.currentSessionID)
+                        
+                        if p.program != nil {
+                            go func() {
+                                p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: ""})
+                            }()
+                        }
+                    }
+                }
+                
+                log.Printf("[INPUT] State synchronized, version=%d", p.version)
             } else {
-                p.currentSessionTitle = ""
-                log.Printf("[INPUT] State sync: session %s not found, cleared title", p.currentSessionID)
+                log.Printf("[INPUT] Ignoring state sync with older/same version %d (current: %d)", payload.State.Version.Version, p.version)
             }
-            
-            log.Printf("[INPUT] State synchronized, version=%d", p.version)
         }
     }
     return nil
@@ -1436,6 +1534,25 @@ type MessageSentMsg struct {
     Message types.MessageInfo
 }
 
+type TitleUpdatedMsg struct {
+    SessionID string
+    Title     string
+}
+
+type PreloadCompletedMsg struct {
+    SessionCount int
+}
+
+type SessionSyncMsg struct {
+	Sessions         []types.SessionInfo
+	CurrentSessionID string
+	Version          int64
+}
+
+type SessionUpdatedMsg struct {
+	Session types.SessionInfo
+}
+
 // Utility functions
 func max(a, b int) int {
 	if a > b {
@@ -1523,6 +1640,9 @@ func main() {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+
+	// Set program reference in panel for UI updates
+	panel.program = program
 
 	// Handle signals
 	_, cancel := context.WithCancel(context.Background())

@@ -22,17 +22,18 @@ import (
 
 // SessionsPanel manages the sessions list panel
 type SessionsPanel struct {
-    client           *opencode.Client
-    ipcClient        *ipc.SocketClient
-    sessions         []types.SessionInfo
-    currentIndex     int
-    currentSessionID string
-    width            int
-    height           int
-    ctx              context.Context
-    cancel           context.CancelFunc
-    version          int64 // Store the state version directly in the model
-    eventsChan       chan types.StateEvent
+	client           *opencode.Client
+	ipcClient        *ipc.SocketClient
+	sessions         []types.SessionInfo
+	currentIndex     int
+	currentSessionID string
+	width            int
+	height           int
+	ctx              context.Context
+	cancel           context.CancelFunc
+	version          int64 // Store the state version directly in the model
+	eventsChan       chan types.StateEvent
+	program          *tea.Program // Reference to the program for triggering updates
 }
 
 // NewSessionsPanel creates a new sessions panel
@@ -129,6 +130,14 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrorMsg:
 		log.Printf("Sessions panel error: %v", msg.Error)
+		return p, nil
+
+	case SessionSyncMsg:
+		log.Printf("[SESSIONS] Received session sync with %d sessions", len(msg.Sessions))
+		return p, nil
+
+	case SessionUpdatedMsg:
+		log.Printf("[SESSIONS] Session updated: %s", msg.Session.ID)
 		return p, nil
 
 	case SessionDeletedMsg:
@@ -322,7 +331,11 @@ func (p *SessionsPanel) refreshSessions() tea.Cmd {
 			}
 		}
 
-		return SessionsRefreshedMsg{Sessions: sessionInfos}
+		return SessionSyncMsg{
+			Sessions:         sessionInfos,
+			CurrentSessionID: "",
+			Version:          1,
+		}
 	}
 }
 
@@ -335,6 +348,13 @@ func (p *SessionsPanel) handleSessionAdded(event types.StateEvent) error {
 			p.sessions = append(p.sessions, sessionAddPayload.Session)
 			p.version = event.Version
 			log.Printf("Session added: %s, version updated to %d", sessionAddPayload.Session.ID, p.version)
+			
+			// Trigger immediate UI update
+			if p.program != nil {
+				go func() {
+					p.program.Send(SessionCreatedMsg{Session: sessionAddPayload.Session})
+				}()
+			}
 		}
 	}
 	return nil
@@ -355,6 +375,13 @@ func (p *SessionsPanel) handleSessionDeleted(event types.StateEvent) error {
 			}
 			p.version = event.Version
 			log.Printf("Session deleted: %s, version updated to %d", sessionDeletePayload.SessionID, p.version)
+			
+			// Trigger immediate UI update
+			if p.program != nil {
+				go func() {
+					p.program.Send(SessionDeletedMsg{SessionID: sessionDeletePayload.SessionID})
+				}()
+			}
 		}
 	}
 	return nil
@@ -364,6 +391,7 @@ func (p *SessionsPanel) handleSessionUpdated(event types.StateEvent) error {
 	if payload, ok := event.Data.(map[string]interface{}); ok {
 		var sessionUpdatePayload types.SessionUpdatePayload
 		if err := decodePayload(payload, &sessionUpdatePayload); err == nil {
+			var updatedSession types.SessionInfo
 			for i, session := range p.sessions {
 				if session.ID == sessionUpdatePayload.SessionID {
 					if sessionUpdatePayload.Title != "" {
@@ -371,11 +399,19 @@ func (p *SessionsPanel) handleSessionUpdated(event types.StateEvent) error {
 					}
 					p.sessions[i].IsActive = sessionUpdatePayload.IsActive
 					p.sessions[i].UpdatedAt = time.Now()
+					updatedSession = p.sessions[i]
 					break
 				}
 			}
 			p.version = event.Version
 			log.Printf("Session updated: %s, version updated to %d", sessionUpdatePayload.SessionID, p.version)
+			
+			// Trigger immediate UI update
+			if p.program != nil {
+				go func() {
+					p.program.Send(SessionUpdatedMsg{Session: updatedSession})
+				}()
+			}
 		}
 	}
 	return nil
@@ -385,10 +421,18 @@ func (p *SessionsPanel) handleSessionChanged(event types.StateEvent) error {
 	if payload, ok := event.Data.(map[string]interface{}); ok {
 		var sessionChangePayload types.SessionChangePayload
 		if err := decodePayload(payload, &sessionChangePayload); err == nil {
+			oldSessionID := p.currentSessionID
 			p.currentSessionID = sessionChangePayload.SessionID
 			p.version = event.Version
 			p.updateCurrentIndex()
-			log.Printf("Session changed to %s, version updated to %d", sessionChangePayload.SessionID, p.version)
+			log.Printf("Session changed from %s to %s, version updated to %d", oldSessionID, sessionChangePayload.SessionID, p.version)
+			
+			// Trigger immediate UI update
+			if p.program != nil {
+				go func() {
+					p.program.Send(SessionSelectedMsg{SessionID: sessionChangePayload.SessionID})
+				}()
+			}
 		}
 	}
 	return nil
@@ -396,11 +440,28 @@ func (p *SessionsPanel) handleSessionChanged(event types.StateEvent) error {
 
 func (p *SessionsPanel) handleStateSync(event types.StateEvent) error {
 	if payload, ok := event.Data.(types.StateSyncPayload); ok {
-		p.sessions = payload.State.Sessions
-		p.currentSessionID = payload.State.CurrentSessionID
-		p.version = payload.State.Version.Version
-		p.updateCurrentIndex()
-		log.Printf("State synchronized")
+		// Smart cache invalidation - only update if version is newer
+		if payload.State.Version.Version > p.version {
+			oldVersion := p.version
+			p.sessions = payload.State.Sessions
+			p.currentSessionID = payload.State.CurrentSessionID
+			p.version = payload.State.Version.Version
+			p.updateCurrentIndex()
+			log.Printf("State synchronized from version %d to %d", oldVersion, p.version)
+			
+			// Trigger immediate UI update for state sync
+			if p.program != nil {
+				go func() {
+					p.program.Send(SessionSyncMsg{
+						Sessions:         payload.State.Sessions,
+						CurrentSessionID: payload.State.CurrentSessionID,
+						Version:          payload.State.Version.Version,
+					})
+				}()
+			}
+		} else {
+			log.Printf("Ignoring state sync with older/same version %d (current: %d)", payload.State.Version.Version, p.version)
+		}
 	}
 	return nil
 }
@@ -543,8 +604,14 @@ type SessionDeletedMsg struct {
 	SessionID string
 }
 
-type SessionsRefreshedMsg struct {
-	Sessions []types.SessionInfo
+type SessionSyncMsg struct {
+	Sessions         []types.SessionInfo
+	CurrentSessionID string
+	Version          int64
+}
+
+type SessionUpdatedMsg struct {
+	Session types.SessionInfo
 }
 
 // decodePayload is a helper to convert a map payload from JSON decoding back into a specific struct type.
@@ -609,6 +676,9 @@ func main() {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+
+	// Set the program reference in the panel for UI updates
+	panel.program = program
 
 	// Handle signals
 	_, cancel := context.WithCancel(context.Background())
