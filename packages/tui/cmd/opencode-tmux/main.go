@@ -831,6 +831,46 @@ func (orch *TmuxOrchestrator) handleSSEEvent(data string) {
     }
 
     switch env.Type {
+    case "session.idle":
+        // properties: { sessionID: string }
+        type sessionIdleProps struct {
+            SessionID string `json:"sessionID"`
+        }
+        var props sessionIdleProps
+        if err := json.Unmarshal(env.Properties, &props); err != nil {
+            log.Printf("[SSE] Failed to decode session.idle properties: %v", err)
+            return
+        }
+        log.Printf("[SSE] Session %s is now idle", props.SessionID)
+        // For now, just log the event. Could be used for UI state updates in the future.
+
+    case "session.updated":
+        // properties: { info: Session }
+        type sessionUpdatedProps struct {
+            Info opencode.Session `json:"info"`
+        }
+        var props sessionUpdatedProps
+        if err := json.Unmarshal(env.Properties, &props); err != nil {
+            log.Printf("[SSE] Failed to decode session.updated properties: %v", err)
+            return
+        }
+
+        // Update session in state
+        sessionInfo := types.SessionInfo{
+            ID:           props.Info.ID,
+            Title:        props.Info.Title,
+            CreatedAt:    parseServerTime(props.Info.Time.Created),
+            UpdatedAt:    parseServerTime(props.Info.Time.Updated),
+            MessageCount: 0, // Will be updated by message events
+            IsActive:     true,
+        }
+
+        if err := orch.syncManager.UpdateSession(sessionInfo.ID, sessionInfo.Title, sessionInfo.IsActive, "sse"); err != nil {
+            log.Printf("[SSE] Failed to update session in state: %v", err)
+            return
+        }
+        log.Printf("[SSE] Session updated in state: %s", sessionInfo.ID)
+
     case "message.updated":
         // properties: { info: Message }
         type messageUpdatedProps struct {

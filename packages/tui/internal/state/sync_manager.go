@@ -372,19 +372,18 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		if err := decodePayload(update.Payload, &payload); err != nil {
 			return err
 		}
-		if !manager.state.SetCurrentSession(payload.SessionID) {
-			// Log warning instead of error if session does not exist yet
-			log.Printf("Warning: session %s not found during SessionChanged update", payload.SessionID)
-		}
+		// Set current session, but don't fail if session doesn't exist
+		// This makes session switching more robust
+		manager.state.SetCurrentSession(payload.SessionID)
 
 	case types.SessionDeleted:
 		var payload types.SessionDeletePayload
 		if err := decodePayload(update.Payload, &payload); err != nil {
 			return err
 		}
-		if !manager.state.RemoveSession(payload.SessionID) {
-			return fmt.Errorf("session %s not found for deletion", payload.SessionID)
-		}
+		// Remove session if it exists, but don't fail if it doesn't exist
+		// This makes the deletion operation idempotent and more robust
+		manager.state.RemoveSession(payload.SessionID)
 
 	case types.MessageAdded:
 		var payload types.MessageAddPayload

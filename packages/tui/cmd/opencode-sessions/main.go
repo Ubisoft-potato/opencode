@@ -131,6 +131,18 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("Sessions panel error: %v", msg.Error)
 		return p, nil
 
+	case SessionDeletedMsg:
+		log.Printf("Session deleted: %s", msg.SessionID)
+		// UI will be refreshed automatically since the session was already removed
+		// from p.sessions in handleSessionDeleted via the SessionEventMsg flow
+		return p, nil
+
+	case SessionCreatedMsg:
+		log.Printf("Session created: %s", msg.Session.ID)
+		// UI will be refreshed automatically since the session was already added
+		// to p.sessions in handleSessionAdded via the SessionEventMsg flow
+		return p, nil
+
     case SessionEventMsg:
         _, cmd := p.handleSessionEvent(msg.Event)
         return p, tea.Batch(cmd, p.subscribeSessionEvents())
@@ -261,12 +273,7 @@ func (p *SessionsPanel) deleteCurrentSession() tea.Cmd {
 	if p.currentIndex >= 0 && p.currentIndex < len(p.sessions) {
 		sessionID := p.sessions[p.currentIndex].ID
 		return func() tea.Msg {
-			// Delete via API
-			if _, err := p.client.Session.Delete(p.ctx, sessionID, opencode.SessionDeleteParams{}); err != nil {
-				return ErrorMsg{Error: fmt.Errorf("failed to delete session: %w", err)}
-			}
-
-			// Send update
+			// Send update first to remove from shared state
         update := types.StateUpdate{
             Type:            types.SessionDeleted,
             ExpectedVersion: p.expectedVersion(),
@@ -277,9 +284,16 @@ func (p *SessionsPanel) deleteCurrentSession() tea.Cmd {
 
 			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 			if err != nil {
-				return ErrorMsg{Error: err}
+				// If state update fails, don't proceed with API deletion
+				return ErrorMsg{Error: fmt.Errorf("failed to update state for session deletion: %w", err)}
 			}
 			p.version = newVersion
+
+			// Delete via API after state update
+			if _, err := p.client.Session.Delete(p.ctx, sessionID, opencode.SessionDeleteParams{}); err != nil {
+				log.Printf("Warning: API deletion failed for session %s, but state was updated: %v", sessionID, err)
+				// Don't return error here since state was already updated
+			}
 
 			return SessionDeletedMsg{SessionID: sessionID}
 		}
