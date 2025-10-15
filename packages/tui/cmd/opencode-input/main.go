@@ -703,8 +703,9 @@ func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
     if payloadMap, ok := event.Data.(map[string]interface{}); ok {
         var payload types.SessionChangePayload
         if err := decodePayload(payloadMap, &payload); err == nil {
+            oldSessionID := p.currentSessionID
             p.currentSessionID = payload.SessionID
-            log.Printf("[INPUT] Session changed to %s, version=%d", payload.SessionID, event.Version)
+            log.Printf("[INPUT] Session changed from %s to %s, version=%d", oldSessionID, payload.SessionID, event.Version)
             // Sync local version to event version to avoid conflicts
             p.version = event.Version
         }
@@ -747,6 +748,8 @@ func (p *InputPanel) handleInputEvent(event types.StateEvent) (tea.Model, tea.Cm
 		p.handleCursorMoved(event)
 	case types.EventSessionChanged:
 		p.handleSessionChanged(event)
+		// Return a command to trigger UI re-render after session change
+		return p, tea.Batch()
 	case types.EventStateSync:
 		p.handleStateSync(event)
 	}
@@ -1098,6 +1101,9 @@ func (p *InputPanel) renderInput() string {
 	if p.isMultiline {
 		header += " [MULTILINE]"
 	}
+	
+	// Debug log to track header rendering
+	log.Printf("[INPUT] Rendering header: %s (currentSessionID: %s)", header, p.currentSessionID)
 
 	headerContent := styles.NewStyle().
 		Foreground(t.Primary()).
