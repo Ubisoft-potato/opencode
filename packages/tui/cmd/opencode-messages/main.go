@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/lipgloss/v2"
 	"github.com/charmbracelet/lipgloss/v2/compat"
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
@@ -632,44 +633,53 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 
 	switch message.Type {
 	case "user":
-		// User messages: light background with dark text for better readability
+		// User messages: border box with theme text color for proper visibility
 		style = styles.NewStyle().
-			Background(t.BackgroundElement()).
 			Foreground(t.Text()).
 			Padding(1, 2).
 			MarginBottom(1).
+			BorderStyle(styles.RoundedBorder).
+			BorderTop(true).
+			BorderBottom(true).
 			BorderLeft(true).
-			BorderStyle(styles.NormalBorder).
-			BorderLeftForeground(t.Success())
+			BorderRight(true).
+			BorderForeground(t.Success())
 		prefix = "🧑 You: "
 	case "assistant":
-		// Assistant messages: slightly different background with accent color
+		// Assistant messages: theme text color with no background
 		style = styles.NewStyle().
-			Background(t.BackgroundPanel()).
 			Foreground(t.Text()).
 			Padding(1, 2).
 			MarginBottom(1).
+			BorderStyle(styles.RoundedBorder).
+			BorderTop(true).
+			BorderBottom(true).
 			BorderLeft(true).
-			BorderStyle(styles.NormalBorder).
-			BorderLeftForeground(t.Info())
+			BorderRight(true).
+			BorderForeground(t.Info())
 		prefix = "🤖 Assistant: "
 	case "system":
-		// System messages: warning style
+		// System messages: default text color with no background
 		style = styles.NewStyle().
-			Background(t.BackgroundElement()).
-			Foreground(t.Warning()).
 			Padding(1, 2).
 			MarginBottom(1).
+			BorderStyle(styles.RoundedBorder).
+			BorderTop(true).
+			BorderBottom(true).
 			BorderLeft(true).
-			BorderStyle(styles.NormalBorder).
-			BorderLeftForeground(t.Warning())
+			BorderRight(true).
+			BorderForeground(t.Warning())
 		prefix = "⚙️ System: "
 	default:
 		style = styles.NewStyle().
-			Background(t.BackgroundElement()).
-			Foreground(t.Text()).
 			Padding(1, 2).
-			MarginBottom(1)
+			MarginBottom(1).
+			BorderStyle(styles.RoundedBorder).
+			BorderTop(true).
+			BorderBottom(true).
+			BorderLeft(true).
+			BorderRight(true).
+			BorderForeground(t.BorderSubtle())
 		prefix = fmt.Sprintf("%s: ", message.Type)
 	}
 
@@ -677,10 +687,10 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 	
 	// Render content based on mode
 	if p.markdownMode {
-		// Use markdown rendering for message content
+		// Use transparent background for code blocks
 		backgroundColor := compat.AdaptiveColor{
-			Light: t.BackgroundPanel().Light,
-			Dark:  t.BackgroundPanel().Dark,
+			Light: lipgloss.NoColor{},
+			Dark:  lipgloss.NoColor{},
 		}
 		
 		// Render the message content as markdown
