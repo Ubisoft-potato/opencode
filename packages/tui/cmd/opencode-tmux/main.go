@@ -809,6 +809,28 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
             log.Printf("[SSE] Unexpected union type for message.removed")
         }
 
+    case opencode.EventListResponseTypeSessionDeleted:
+        uni := evt.AsUnion()
+        if v, ok := uni.(opencode.EventListResponseEventSessionDeleted); ok {
+            // Construct a session deletion update
+            upd := types.StateUpdate{
+                ID:              fmt.Sprintf("del_session_%s_%d", v.Properties.Info.ID, time.Now().UnixNano()),
+                Type:            types.SessionDeleted,
+                ExpectedVersion: orch.syncManager.GetState().GetCurrentVersion(),
+                Payload:         types.SessionDeletePayload{SessionID: v.Properties.Info.ID},
+                SourcePanel:     "sse",
+                Timestamp:       time.Now(),
+            }
+            // Apply the update without version check to make deletion idempotent
+            if err := orch.syncManager.UpdateWithVersionCheck(upd); err != nil {
+                log.Printf("[SSE] Failed to delete session %s: %v", v.Properties.Info.ID, err)
+            } else {
+                log.Printf("[SSE] Session deleted from state: %s", v.Properties.Info.ID)
+            }
+        } else {
+            log.Printf("[SSE] Unexpected union type for session.deleted")
+        }
+
     default:
         // Log unhandled event types for future mapping
         log.Printf("[SSE] Unhandled event type: %s", string(evt.Type))
