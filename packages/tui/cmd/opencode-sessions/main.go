@@ -159,7 +159,12 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ThemeChangedMsg:
 		log.Printf("[SESSIONS] Applying theme change: %s", msg.Theme)
-		// Theme change will be handled by the UI refresh
+		// Apply the theme change immediately
+		if err := theme.SetTheme(msg.Theme); err != nil {
+			log.Printf("[SESSIONS] Failed to apply theme %s: %v", msg.Theme, err)
+		} else {
+			log.Printf("[SESSIONS] Successfully applied theme: %s", msg.Theme)
+		}
 		return p, nil
 
 	default:
@@ -473,17 +478,29 @@ func (p *SessionsPanel) handleStateSync(event types.StateEvent) error {
 }
 
 func (p *SessionsPanel) handleThemeChanged(event types.StateEvent) error {
-	if payload, ok := event.Data.(types.ThemeChangePayload); ok {
-		log.Printf("[SESSIONS] Theme changed to: %s", payload.Theme)
-		
-		// Trigger immediate UI update for theme change
-		if p.program != nil {
-			go func() {
-				p.program.Send(ThemeChangedMsg{
-					Theme: payload.Theme,
-				})
-			}()
-		}
+	var payload types.ThemeChangePayload
+	if err := decodePayload(event.Data, &payload); err != nil {
+		log.Printf("[SESSIONS] Failed to decode theme change payload: %v", err)
+		return err
+	}
+	
+	log.Printf("[SESSIONS] Theme changed to: %s", payload.Theme)
+	
+	// Apply the theme change immediately
+	if err := theme.SetTheme(payload.Theme); err != nil {
+		log.Printf("[SESSIONS] Failed to set theme %s: %v", payload.Theme, err)
+		return err
+	}
+	
+	log.Printf("[SESSIONS] Successfully applied theme: %s", payload.Theme)
+	
+	// Trigger immediate UI update for theme change
+	if p.program != nil {
+		go func() {
+			p.program.Send(ThemeChangedMsg{
+				Theme: payload.Theme,
+			})
+		}()
 	}
 	return nil
 }
