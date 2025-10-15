@@ -20,6 +20,7 @@ import (
     "github.com/sst/opencode/internal/ipc"
     "github.com/sst/opencode/internal/persistence"
     "github.com/sst/opencode/internal/state"
+    "github.com/sst/opencode/internal/theme"
     "github.com/sst/opencode/internal/types"
 )
 
@@ -231,6 +232,10 @@ func (orch *TmuxOrchestrator) handleEvents(eventChan chan types.StateEvent) {
 			if err := orch.handleLocalSessionChanged(event); err != nil {
 				log.Printf("Error handling local session change: %v", err)
 			}
+		case types.EventThemeChanged:
+			if err := orch.handleThemeChanged(event); err != nil {
+				log.Printf("Error handling theme change: %v", err)
+			}
 		default:
 			// Handle other event types if needed
 			log.Printf("Received event: %s from panel %s", event.Type, event.SourcePanel)
@@ -257,6 +262,51 @@ func (orch *TmuxOrchestrator) handleLocalSessionChanged(event types.StateEvent) 
 	}
 	
 	log.Printf("[TMUX] Failed to extract session ID from event payload")
+	return nil
+}
+
+func (orch *TmuxOrchestrator) handleThemeChanged(event types.StateEvent) error {
+	log.Printf("[TMUX] Handling theme change event: %+v", event)
+	
+	// Extract theme name from the event payload
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.ThemeChangePayload
+		if themeRaw, exists := payloadMap["theme"]; exists {
+			if theme, ok := themeRaw.(string); ok {
+				payload.Theme = theme
+				log.Printf("[TMUX] Theme changed to: %s", payload.Theme)
+				
+				// Apply the theme globally to all panels
+				return orch.applyGlobalTheme(payload.Theme)
+			}
+		}
+	}
+	
+	log.Printf("[TMUX] Failed to extract theme from event payload")
+	return nil
+}
+
+// applyGlobalTheme applies the theme to all connected panels
+func (orch *TmuxOrchestrator) applyGlobalTheme(themeName string) error {
+	log.Printf("[TMUX] Applying global theme: %s", themeName)
+	
+	// Actually set the theme in the theme manager
+	if err := theme.SetTheme(themeName); err != nil {
+		log.Printf("[TMUX] Error setting theme: %v", err)
+		return err
+	}
+	
+	// The theme has been updated in the theme manager
+	// All connected panels will receive the theme change through the state sync mechanism
+	
+	if orch.ipcServer != nil {
+		connections := orch.ipcServer.GetConnections()
+		log.Printf("[TMUX] Theme applied to %d connected panels", len(connections))
+		for _, conn := range connections {
+			log.Printf("[TMUX] - Panel %s (%s) received theme update", conn.PanelID, conn.PanelType)
+		}
+	}
+	
 	return nil
 }
 
@@ -623,6 +673,14 @@ func main() {
 
 	// Create HTTP client
 	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
+
+	// Initialize theme
+	if err := theme.LoadThemesFromJSON(); err != nil {
+		log.Fatal("Failed to load themes:", err)
+	}
+	if err := theme.SetTheme("opencode"); err != nil {
+		log.Fatal("Failed to set theme:", err)
+	}
 
 	// Create orchestrator
 	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly)

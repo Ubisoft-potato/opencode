@@ -67,6 +67,7 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
     panel.ipcClient.RegisterEventHandler(state.EventMessageDeleted, panel.forwardEventToUI)
     panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.forwardEventToUI)
     panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.forwardEventToUI)
+    panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardEventToUI)
 
     // Wildcard handler to log receipt of any event type for diagnostics
     panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
@@ -430,6 +431,25 @@ func (p *MessagesPanel) handleStateSync(event state.StateEvent) error {
     return nil
 }
 
+func (p *MessagesPanel) handleThemeChanged(event state.StateEvent) error {
+	var payload types.ThemeChangePayload
+	if err := decodePayload(event.Data.(map[string]interface{}), &payload); err != nil {
+		log.Printf("[MESSAGES] Failed to decode theme change payload: %v", err)
+		return err
+	}
+	
+	log.Printf("[MESSAGES] Theme changed to: %s", payload.Theme)
+	
+	// Apply the theme change immediately
+	if err := theme.SetTheme(payload.Theme); err != nil {
+		log.Printf("[MESSAGES] Failed to set theme %s: %v", payload.Theme, err)
+		return err
+	}
+	
+	log.Printf("[MESSAGES] Successfully applied theme: %s", payload.Theme)
+	return nil
+}
+
 // handleAnyEvent logs any received event for diagnostics
 func (p *MessagesPanel) handleAnyEvent(event state.StateEvent) error {
     p.version = event.Version
@@ -461,6 +481,8 @@ func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, t
         p.handleSessionChanged(event)
     case state.EventStateSync:
         p.handleStateSync(event)
+    case types.EventThemeChanged:
+        p.handleThemeChanged(event)
     }
     return p, nil
 }

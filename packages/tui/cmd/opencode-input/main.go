@@ -49,11 +49,27 @@ type InputPanel struct {
 	helpScrollOffset int    // Current scroll position in help content
 	helpScrollMode   bool   // Whether we're in help scroll mode
 	helpLines        []string // Cached help lines for scrolling
+	// Theme switching state
+	comfortableThemes []string // List of comfortable themes for cycling
+	currentThemeIndex int      // Current index in comfortable themes list
 }
 
 // NewInputPanel creates a new input panel
 func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Define comfortable themes for cycling
+	comfortableThemes := []string{"dracula", "gruvbox", "tokyonight", "catppuccin", "nord", "rosepine"}
+	
+	// Find current theme index
+	currentTheme := theme.CurrentThemeName()
+	currentIndex := 0
+	for i, themeName := range comfortableThemes {
+		if themeName == currentTheme {
+			currentIndex = i
+			break
+		}
+	}
 
 	panel := &InputPanel{
 		client:         httpClient,
@@ -72,6 +88,8 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 		helpScrollOffset: 0,
 		helpScrollMode:   false,
 		helpLines:        make([]string, 0),
+		comfortableThemes: comfortableThemes,
+		currentThemeIndex: currentIndex,
 	}
 
     // Register event handlers
@@ -414,6 +432,10 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		p.buffer = ""
 		p.cursorPosition = 0
 		return p, p.syncInputState()
+
+	case "ctrl+t":
+		// Cycle through comfortable themes
+		return p.cycleTheme()
 
 	case "f1":
 		p.showHelp = !p.showHelp
@@ -1143,24 +1165,40 @@ func (p *InputPanel) changeModel(provider, model string) tea.Cmd {
 }
 
 func (p *InputPanel) changeAgent(agent string) tea.Cmd {
-	log.Printf("[INPUT] Changing agent to: %s", agent)
+    return func() tea.Msg {
+        update := types.StateUpdate{
+            Type:            types.AgentChanged,
+            Payload:         types.AgentChangePayload{Agent: agent},
+            SourcePanel:     "input-panel",
+            Timestamp:       time.Now(),
+            // ExpectedVersion will be set by sendUpdateWithRetry
+        }
+        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+            return ErrorMsg{Error: err}
+        } else {
+            p.version = newVersion
+        }
 
-	update := types.StateUpdate{
-		Type: types.AgentChanged,
-		Payload: types.AgentChangePayload{Agent: agent},
-		SourcePanel: "input-panel",
-		ExpectedVersion: p.expectedVersion(),
-	}
+        return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
+    }
+}
 
-	_, err := p.sendUpdateWithRetry(update)
-	if err != nil {
-		log.Printf("[INPUT] Failed to change agent: %v", err)
-		return func() tea.Msg {
-			return ErrorMsg{Error: fmt.Errorf("failed to change agent: %v", err)}
+// cycleTheme cycles through comfortable themes
+func (p *InputPanel) cycleTheme() (tea.Model, tea.Cmd) {
+	// Move to next theme in the list
+	p.currentThemeIndex = (p.currentThemeIndex + 1) % len(p.comfortableThemes)
+	nextTheme := p.comfortableThemes[p.currentThemeIndex]
+	
+	// Apply the theme locally first
+	if err := theme.SetTheme(nextTheme); err != nil {
+		log.Printf("[INPUT] Failed to set theme locally: %v", err)
+		return p, func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("Failed to switch theme: %v", err)}
 		}
 	}
-
-	return nil
+	
+	// Send theme change to other panels
+	return p, p.changeTheme(nextTheme)
 }
 
 // cacheHelpLines caches the full help content lines for scrolling
@@ -1185,6 +1223,7 @@ func (p *InputPanel) cacheHelpLines() {
 		"  Ctrl+U                   Delete to beginning of line",
 		"  Ctrl+W                   Delete previous word",
 		"  Ctrl+L                   Clear buffer",
+		"  Ctrl+T                   Cycle through comfortable themes",
 		"  F1                       Toggle this help",
 		"  Page Up/Down             Scroll help content",
 		"  Esc                      Exit help scroll mode",

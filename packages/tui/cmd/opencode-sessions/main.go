@@ -57,6 +57,7 @@ panel := &SessionsPanel{
     panel.ipcClient.RegisterEventHandler(types.EventSessionUpdated, panel.forwardSessionEventToUI)
     panel.ipcClient.RegisterEventHandler(types.EventSessionChanged, panel.forwardSessionEventToUI)
     panel.ipcClient.RegisterEventHandler(types.EventStateSync, panel.forwardSessionEventToUI)
+    panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardSessionEventToUI)
 
 	return panel
 }
@@ -155,6 +156,11 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case SessionEventMsg:
         _, cmd := p.handleSessionEvent(msg.Event)
         return p, tea.Batch(cmd, p.subscribeSessionEvents())
+
+	case ThemeChangedMsg:
+		log.Printf("[SESSIONS] Applying theme change: %s", msg.Theme)
+		// Theme change will be handled by the UI refresh
+		return p, nil
 
 	default:
 		return p, nil
@@ -466,6 +472,22 @@ func (p *SessionsPanel) handleStateSync(event types.StateEvent) error {
 	return nil
 }
 
+func (p *SessionsPanel) handleThemeChanged(event types.StateEvent) error {
+	if payload, ok := event.Data.(types.ThemeChangePayload); ok {
+		log.Printf("[SESSIONS] Theme changed to: %s", payload.Theme)
+		
+		// Trigger immediate UI update for theme change
+		if p.program != nil {
+			go func() {
+				p.program.Send(ThemeChangedMsg{
+					Theme: payload.Theme,
+				})
+			}()
+		}
+	}
+	return nil
+}
+
 func (p *SessionsPanel) handleSessionEvent(event types.StateEvent) (tea.Model, tea.Cmd) {
 	// Handle event processing here
 	switch event.Type {
@@ -479,6 +501,8 @@ func (p *SessionsPanel) handleSessionEvent(event types.StateEvent) (tea.Model, t
 		p.handleSessionChanged(event)
 	case types.EventStateSync:
 		p.handleStateSync(event)
+	case types.EventThemeChanged:
+		p.handleThemeChanged(event)
 	}
 	return p, nil
 }
@@ -612,6 +636,10 @@ type SessionSyncMsg struct {
 
 type SessionUpdatedMsg struct {
 	Session types.SessionInfo
+}
+
+type ThemeChangedMsg struct {
+	Theme string
 }
 
 // decodePayload is a helper to convert a map payload from JSON decoding back into a specific struct type.

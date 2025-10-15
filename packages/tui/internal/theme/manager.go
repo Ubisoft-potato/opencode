@@ -30,15 +30,15 @@ var globalManager = &Manager{
 }
 
 // RegisterTheme adds a new theme to the registry.
-// If this is the first theme registered, it becomes the default.
+// If this is the first theme registered and no theme is currently set, it becomes the default.
 func RegisterTheme(name string, theme Theme) {
 	globalManager.mu.Lock()
 	defer globalManager.mu.Unlock()
 
 	globalManager.themes[name] = theme
 
-	// If this is the first theme, make it the default
-	if globalManager.currentName == "" {
+	// Only set as default if no theme is currently set and this is the first theme
+	if globalManager.currentName == "" && len(globalManager.themes) == 1 {
 		globalManager.currentName = name
 		globalManager.currentUsesAnsiCache = themeUsesAnsiColors(theme)
 	}
