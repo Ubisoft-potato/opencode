@@ -34,6 +34,7 @@ type InputPanel struct {
 	history          []string
 	historyIndex     int
 	currentSessionID string
+	currentSessionTitle string // Add field to store session title
 	width            int
 	height           int
 	ctx              context.Context
@@ -42,6 +43,7 @@ type InputPanel struct {
 	showHelp         bool
 	lastCommand      string
     version          int64
+    cachedState      *state.SharedApplicationState // Cache the state locally
 	// Scroll state for help content
 	helpScrollOffset int    // Current scroll position in help content
 	helpScrollMode   bool   // Whether we're in help scroll mode
@@ -146,7 +148,18 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StateLoadedMsg:
 		if msg.State != nil {
 			log.Printf("[INPUT] Loading state from IPC server, version %d", msg.State.Version.Version)
+			// Cache the state locally
+			p.cachedState = msg.State
+			
 			p.currentSessionID = msg.State.CurrentSessionID
+			
+			// Get session title for the current session
+			if sessionInfo, found := msg.State.GetSessionByID(p.currentSessionID); found {
+				p.currentSessionTitle = sessionInfo.Title
+			} else {
+				p.currentSessionTitle = ""
+			}
+			
 			p.buffer = msg.State.Input.Buffer
 			p.cursorPosition = msg.State.Input.CursorPosition
 			p.selectionStart = msg.State.Input.SelectionStart
@@ -159,6 +172,7 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("[INPUT] No state available, using defaults")
 			// Initialize with default values
 			p.currentSessionID = ""
+			p.currentSessionTitle = ""
 			p.buffer = ""
 			p.cursorPosition = 0
 			p.selectionStart = 0
@@ -705,7 +719,32 @@ func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
         if err := decodePayload(payloadMap, &payload); err == nil {
             oldSessionID := p.currentSessionID
             p.currentSessionID = payload.SessionID
-            log.Printf("[INPUT] Session changed from %s to %s, version=%d", oldSessionID, payload.SessionID, event.Version)
+            
+            // Try to find session title from cached sessions first
+            if sessionInfo, found := p.getSessionInfo(p.currentSessionID); found {
+                p.currentSessionTitle = sessionInfo.Title
+                log.Printf("[INPUT] Session changed from %s to %s, title updated to '%s' (from cache), version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
+            } else {
+                // If not found in cache, use a fallback title and update asynchronously
+                p.currentSessionTitle = fmt.Sprintf("Session %s", p.currentSessionID[:8])
+                log.Printf("[INPUT] Session changed from %s to %s, using fallback title '%s', version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
+                
+                // Trigger async state request to update cache and title
+                go func() {
+                    if currentState, err := p.ipcClient.RequestState(); err == nil {
+                        p.cachedState = currentState // Update cache
+                        if sessionInfo, found := currentState.GetSessionByID(p.currentSessionID); found {
+                            // Update title in background - this will be reflected in next render
+                            p.currentSessionTitle = sessionInfo.Title
+                            log.Printf("[INPUT] Async title update: session %s title set to '%s'", p.currentSessionID, p.currentSessionTitle)
+                        }
+                    } else {
+                        log.Printf("[INPUT] Async state request failed: %v", err)
+                        // Keep the fallback title if async request fails
+                    }
+                }()
+            }
+            
             // Sync local version to event version to avoid conflicts
             p.version = event.Version
         }
@@ -717,6 +756,9 @@ func (p *InputPanel) handleStateSync(event types.StateEvent) error {
     if payloadMap, ok := event.Data.(map[string]interface{}); ok {
         var payload types.StateSyncPayload
         if err := decodePayload(payloadMap, &payload); err == nil {
+            // Cache the state locally
+            p.cachedState = payload.State
+            
             p.currentSessionID = payload.State.CurrentSessionID
             p.buffer = payload.State.Input.Buffer
             p.cursorPosition = payload.State.Input.CursorPosition
@@ -726,6 +768,16 @@ func (p *InputPanel) handleStateSync(event types.StateEvent) error {
             p.history = payload.State.Input.History
             p.historyIndex = payload.State.Input.HistoryIndex
             p.version = payload.State.Version.Version
+            
+            // Update session title when we receive state sync
+            if sessionInfo, found := payload.State.GetSessionByID(p.currentSessionID); found {
+                p.currentSessionTitle = sessionInfo.Title
+                log.Printf("[INPUT] State sync: updated session title to '%s' for session %s", p.currentSessionTitle, p.currentSessionID)
+            } else {
+                p.currentSessionTitle = ""
+                log.Printf("[INPUT] State sync: session %s not found, cleared title", p.currentSessionID)
+            }
+            
             log.Printf("[INPUT] State synchronized, version=%d", p.version)
         }
     }
@@ -748,8 +800,10 @@ func (p *InputPanel) handleInputEvent(event types.StateEvent) (tea.Model, tea.Cm
 		p.handleCursorMoved(event)
 	case types.EventSessionChanged:
 		p.handleSessionChanged(event)
-		// Return a command to trigger UI re-render after session change
-		return p, tea.Batch()
+		// Return a command to trigger UI re-render immediately after session change
+		return p, tea.Batch(tea.Tick(time.Millisecond*10, func(t time.Time) tea.Msg {
+			return tea.WindowSizeMsg{}
+		}))
 	case types.EventStateSync:
 		p.handleStateSync(event)
 	}
@@ -1096,14 +1150,18 @@ func (p *InputPanel) renderInput() string {
 	// Header
 	header := "Input"
 	if p.currentSessionID != "" {
-		header += fmt.Sprintf(" - Session %s", p.currentSessionID[:8])
+		if p.currentSessionTitle != "" {
+			header += fmt.Sprintf(" - %s", p.currentSessionTitle)
+		} else {
+			header += fmt.Sprintf(" - Session %s", p.currentSessionID[:8])
+		}
 	}
 	if p.isMultiline {
 		header += " [MULTILINE]"
 	}
 	
 	// Debug log to track header rendering
-	log.Printf("[INPUT] Rendering header: %s (currentSessionID: %s)", header, p.currentSessionID)
+	log.Printf("[INPUT] Rendering header: %s (currentSessionID: %s, currentSessionTitle: %s)", header, p.currentSessionID, p.currentSessionTitle)
 
 	headerContent := styles.NewStyle().
 		Foreground(t.Primary()).
@@ -1384,6 +1442,23 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// getSessionInfo retrieves session information from the cached state
+func (p *InputPanel) getSessionInfo(sessionID string) (types.SessionInfo, bool) {
+	// Use cached state if available
+	if p.cachedState != nil {
+		return p.cachedState.GetSessionByID(sessionID)
+	}
+	
+	// Fallback to requesting state only if no cache is available
+	if currentState, err := p.ipcClient.RequestState(); err == nil {
+		p.cachedState = currentState // Cache the result
+		return currentState.GetSessionByID(sessionID)
+	} else {
+		log.Printf("[INPUT] Failed to request session info: %v", err)
+		return types.SessionInfo{}, false
+	}
 }
 
 // decodePayload converts an event payload map back into the target struct type.
