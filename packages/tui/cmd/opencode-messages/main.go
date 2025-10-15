@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/lipgloss/v2/compat"
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/ipc"
@@ -20,25 +21,27 @@ import (
 	"github.com/sst/opencode/internal/types"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
+	"github.com/sst/opencode/internal/util"
 )
 
 // MessagesPanel manages the message history panel
 type MessagesPanel struct {
-    client           *opencode.Client
-    ipcClient        *ipc.SocketClient
-    messages         []types.MessageInfo
-    currentSessionID string
-    scrollOffset     int
-    width            int
-    height           int
-    ctx              context.Context
-    cancel           context.CancelFunc
-    autoScroll       bool
-    showTimestamps   bool
-    isStreaming      bool
-    currentMessage   *types.MessageInfo
-    version          int64
-    eventsChan       chan state.StateEvent
+	client           *opencode.Client
+	ipcClient        *ipc.SocketClient
+	messages         []types.MessageInfo
+	currentSessionID string
+	scrollOffset     int
+	width            int
+	height           int
+	ctx              context.Context
+	cancel           context.CancelFunc
+	autoScroll       bool
+	showTimestamps   bool
+	isStreaming      bool
+	currentMessage   *types.MessageInfo
+	version          int64
+	eventsChan       chan state.StateEvent
+	markdownMode     bool // true for markdown rendering, false for plain text
 }
 
 // NewMessagesPanel creates a new messages panel
@@ -52,6 +55,7 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
 		scrollOffset:   0,
 		autoScroll:     true,
 		showTimestamps: false,
+		markdownMode:   true, // Default to markdown mode
 		ctx:            ctx,
 		cancel:         cancel,
 		eventsChan:     make(chan state.StateEvent, 64),
@@ -200,6 +204,10 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		return p, p.refreshMessages()
+
+	case "m":
+		p.markdownMode = !p.markdownMode
+		// No need to return a command, just toggle the mode
 	}
 
 	return p, nil
@@ -571,9 +579,13 @@ func (p *MessagesPanel) renderMessages() string {
 	}
 
 	// Help text
+	modeText := "plain"
+	if p.markdownMode {
+		modeText = "markdown"
+	}
 	content += "\n" + styles.NewStyle().
 		Foreground(t.TextMuted()).
-		Render("↑/k up • ↓/j down • PgUp/PgDn page • Home/End • t timestamps • a auto-scroll • r refresh • q quit")
+		Render(fmt.Sprintf("↑/k up • ↓/j down • PgUp/PgDn page • Home/End • t timestamps • a auto-scroll • m mode(%s) • r refresh • q quit", modeText))
 
 	return content
 }
@@ -611,24 +623,76 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 		prefix = fmt.Sprintf("%s: ", message.Type)
 	}
 
-	content := prefix + message.Content
+	var content string
+	
+	// Render content based on mode
+	if p.markdownMode {
+		// Use markdown rendering for message content
+		backgroundColor := compat.AdaptiveColor{
+			Light: t.BackgroundPanel().Light,
+			Dark:  t.BackgroundPanel().Dark,
+		}
+		
+		// Render the message content as markdown
+		renderedContent := util.ToMarkdown(message.Content, p.width-len(prefix)-4, backgroundColor)
+		
+		// Add prefix to each line of the rendered content
+		lines := strings.Split(renderedContent, "\n")
+		for i, line := range lines {
+			if i == 0 {
+				lines[i] = prefix + line
+			} else {
+				// Indent continuation lines to align with content
+				lines[i] = strings.Repeat(" ", len(prefix)) + line
+			}
+		}
+		content = strings.Join(lines, "\n")
+	} else {
+		// Plain text mode
+		content = prefix + message.Content
+		
+		// Word wrap content to fit width
+		if p.width > 0 {
+			content = p.wordWrap(content, p.width-2)
+		}
+	}
 
 	// Add timestamp if enabled
 	if p.showTimestamps {
 		timestamp := message.Timestamp.Format("15:04:05")
-		content = fmt.Sprintf("[%s] %s", timestamp, content)
+		if p.markdownMode {
+			// For markdown mode, add timestamp to the first line only
+			lines := strings.Split(content, "\n")
+			if len(lines) > 0 {
+				lines[0] = fmt.Sprintf("[%s] %s", timestamp, lines[0])
+				content = strings.Join(lines, "\n")
+			}
+		} else {
+			content = fmt.Sprintf("[%s] %s", timestamp, content)
+		}
 	}
 
 	// Add status indicator for pending messages
 	if message.Status == "pending" {
-		content += " ⏳"
+		if p.markdownMode {
+			lines := strings.Split(content, "\n")
+			if len(lines) > 0 {
+				lines[len(lines)-1] += " ⏳"
+				content = strings.Join(lines, "\n")
+			}
+		} else {
+			content += " ⏳"
+		}
 	} else if message.Status == "error" {
-		content += " ❌"
-	}
-
-	// Word wrap content to fit width
-	if p.width > 0 {
-		content = p.wordWrap(content, p.width-2)
+		if p.markdownMode {
+			lines := strings.Split(content, "\n")
+			if len(lines) > 0 {
+				lines[len(lines)-1] += " ❌"
+				content = strings.Join(lines, "\n")
+			}
+		} else {
+			content += " ❌"
+		}
 	}
 
 	return style.Render(content)
