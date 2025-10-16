@@ -740,9 +740,7 @@ func (orch *TmuxOrchestrator) startSSEClient() error {
                 // Open a new stream filtered by project directory
                 stream := orch.httpClient.Event.ListStreaming(
                     orch.ctx,
-                    opencode.EventListParams{
-                        Directory: opencode.F("/Users/hhx/work/upwork/opencode"),
-                    },
+                    opencode.EventListParams{},
                 )
 
                 for stream.Next() {
@@ -1117,9 +1115,7 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 	defer cancel()
 
 	// Get sessions from server
-	sessions, err := orch.httpClient.Session.List(ctx, opencode.SessionListParams{
-		Directory: opencode.F("/Users/hhx/work/upwork/opencode"), // Filter by project root directory
-	})
+	sessions, err := orch.httpClient.Session.List(ctx, opencode.SessionListParams{})
 
 	if err != nil {
 		return fmt.Errorf("failed to list sessions from server: %w", err)
@@ -1203,6 +1199,31 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 
     // If no current session selected, choose the first one for consistency
     st := orch.syncManager.GetState()
+    if len(st.Sessions) > 0 {
+        ensureValid := false
+        if st.CurrentSessionID == "" {
+            ensureValid = true
+        } else {
+            // Verify current selection exists in loaded sessions
+            found := false
+            for _, s := range st.Sessions {
+                if s.ID == st.CurrentSessionID {
+                    found = true
+                    break
+                }
+            }
+            ensureValid = !found
+        }
+
+        if ensureValid {
+            first := st.Sessions[0].ID
+            if err := orch.syncManager.UpdateSessionSelection(first, "server-sync"); err != nil {
+                log.Printf("Warning: failed to set valid session selection: %v", err)
+            } else {
+                log.Printf("Selected valid session: %s", first)
+            }
+        }
+    }
     if st.CurrentSessionID == "" && len(st.Sessions) > 0 {
         first := st.Sessions[0].ID
         if err := orch.syncManager.UpdateSessionSelection(first, "server-sync"); err != nil {

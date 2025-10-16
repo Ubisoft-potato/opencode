@@ -1004,7 +1004,6 @@ func (p *InputPanel) createNewSession() tea.Cmd {
 		defer cancel()
 
 		session, err := p.client.Session.New(ctx, opencode.SessionNewParams{
-			Directory: opencode.F("/Users/hhx/work/upwork/opencode"), // Use project root directory
 			Title:     opencode.F(title),
 		})
 
@@ -1088,7 +1087,6 @@ func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
 		defer cancel()
 
 		result, err := p.client.Session.Delete(ctx, sessionID, opencode.SessionDeleteParams{
-			Directory: opencode.F("/Users/hhx/work/upwork/opencode"), // Use project root directory
 		})
 
 		if err != nil {

@@ -161,28 +161,82 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return p, tea.Quit
 
 	case "up", "k":
+		if len(p.messages) == 0 {
+			break
+		}
+		// Use dynamic scroll calculation
+		maxScroll := p.calculateMaxScroll()
+		if maxScroll == 0 {
+			// All messages fit, no scrolling needed
+			break
+		}
+		
 		if p.scrollOffset > 0 {
-			p.scrollOffset--
+			p.scrollOffset = max(0, p.scrollOffset-3)
 		}
 		p.autoScroll = false
 
 	case "down", "j":
-		maxScroll := p.calculateMaxScroll()
-		if p.scrollOffset < maxScroll {
-			p.scrollOffset++
+		if len(p.messages) == 0 {
+			break
 		}
+		// Use dynamic scroll calculation
+		maxScroll := p.calculateMaxScroll()
+		if maxScroll == 0 {
+			// All messages fit, no scrolling needed
+			break
+		}
+		
+		if p.scrollOffset < maxScroll {
+			p.scrollOffset = min(maxScroll, p.scrollOffset+3)
+		}
+		
 		// Re-enable auto scroll if at bottom
 		if p.scrollOffset >= maxScroll {
 			p.autoScroll = true
 		}
 
 	case "page_up":
-		p.scrollOffset = max(0, p.scrollOffset-p.height/2)
+		if len(p.messages) == 0 {
+			break
+		}
+		maxScroll := p.calculateMaxScroll()
+		if maxScroll == 0 {
+			break
+		}
+		
+		// Calculate available height for messages (excluding header and footer)
+		availableHeight := p.height - 6
+		if availableHeight <= 0 {
+			break
+		}
+		linesPerMessage := 3
+		maxVisibleMessages := availableHeight / linesPerMessage
+		pageSize := max(1, maxVisibleMessages/2)
+		
+		p.scrollOffset = max(0, p.scrollOffset-(pageSize*linesPerMessage))
 		p.autoScroll = false
 
 	case "page_down":
+		if len(p.messages) == 0 {
+			break
+		}
 		maxScroll := p.calculateMaxScroll()
-		p.scrollOffset = min(maxScroll, p.scrollOffset+p.height/2)
+		if maxScroll == 0 {
+			break
+		}
+		
+		// Calculate available height for messages (excluding header and footer)
+		availableHeight := p.height - 6
+		if availableHeight <= 0 {
+			break
+		}
+		linesPerMessage := 3
+		maxVisibleMessages := availableHeight / linesPerMessage
+		pageSize := max(1, maxVisibleMessages/2)
+		
+		p.scrollOffset = min(maxScroll, p.scrollOffset+(pageSize*linesPerMessage))
+		
 		if p.scrollOffset >= maxScroll {
 			p.autoScroll = true
 		}
@@ -534,9 +588,55 @@ func (p *MessagesPanel) filterMessagesForSession(messages []types.MessageInfo, s
 
 // calculateMaxScroll calculates the maximum scroll offset
 func (p *MessagesPanel) calculateMaxScroll() int {
-	visibleLines := p.height - 2 // Account for header
-	totalLines := len(p.messages) * 3 // Approximate lines per message
-	return max(0, totalLines-visibleLines)
+	if len(p.messages) == 0 {
+		return 0
+	}
+
+	// Calculate available height for messages (excluding header and footer)
+	// Account for: header (2 lines), scroll indicator (2 lines), help text (2 lines)
+	availableHeight := p.height - 6
+	if availableHeight <= 0 {
+		return 0
+	}
+
+	// Calculate total height needed for all messages
+	totalHeight := 0
+	for _, message := range p.messages {
+		totalHeight += p.calculateMessageHeight(message)
+	}
+	
+	// If all messages fit, no scrolling needed
+	if totalHeight <= availableHeight {
+		return 0
+	}
+	
+	// Calculate the maximum scroll offset by finding how much we need to scroll
+	// to show the last messages that fit in the available height
+	maxScroll := 0
+	
+	// Start from the beginning and find the scroll offset where
+	// the remaining messages from that point fit in available height
+	for i := 0; i < len(p.messages); i++ {
+		// Calculate height of remaining messages from this point
+		remainingHeight := 0
+		for j := i; j < len(p.messages); j++ {
+			remainingHeight += p.calculateMessageHeight(p.messages[j])
+		}
+		
+		// If remaining messages fit, this is our max scroll position
+		if remainingHeight <= availableHeight {
+			maxScroll = i * 3 // Convert message index to line-based offset
+			break
+		}
+	}
+	
+	// Ensure we don't scroll beyond the last message
+	maxScrollLimit := (len(p.messages) - 1) * 3
+	if maxScroll > maxScrollLimit {
+		maxScroll = maxScrollLimit
+	}
+	
+	return maxScroll
 }
 
 // scrollToBottom scrolls to the bottom of the messages
@@ -589,7 +689,21 @@ func (p *MessagesPanel) renderMessages() string {
 
 	// Footer with scroll indicator
 	if p.calculateMaxScroll() > 0 {
-		scrollIndicator := fmt.Sprintf("[%d/%d]", p.scrollOffset, p.calculateMaxScroll())
+		currentMessageIndex := (p.scrollOffset / 3) + 1 // Convert scroll offset to message number
+		totalMessages := len(p.messages)
+		// Show which message range is currently visible
+		availableHeight := p.height - 4
+		linesPerMessage := 3
+		maxVisibleMessages := availableHeight / linesPerMessage
+		endMessageIndex := min(currentMessageIndex+maxVisibleMessages-1, totalMessages)
+		
+		var scrollIndicator string
+		if maxVisibleMessages == 1 {
+			scrollIndicator = fmt.Sprintf("[%d/%d]", currentMessageIndex, totalMessages)
+		} else {
+			scrollIndicator = fmt.Sprintf("[%d-%d/%d]", currentMessageIndex, endMessageIndex, totalMessages)
+		}
+		
 		if !p.autoScroll {
 			scrollIndicator += " [MANUAL]"
 		}
@@ -619,9 +733,103 @@ func (p *MessagesPanel) calculateVisibleMessages() []types.MessageInfo {
 		return []types.MessageInfo{}
 	}
 
-	// Simple implementation - show all messages for now
-	// In a more sophisticated implementation, you'd calculate based on actual rendered height
-	return p.messages
+	// Calculate available height for messages (excluding header and footer)
+	// Account for: header (2 lines), scroll indicator (2 lines), help text (2 lines)
+	availableHeight := p.height - 6
+	if availableHeight <= 0 {
+		return []types.MessageInfo{}
+	}
+
+	// Calculate start index based on scroll offset
+	// Use message-based scrolling instead of line-based
+	startIndex := p.scrollOffset / 3 // Convert line offset to message offset
+	if startIndex >= len(p.messages) {
+		startIndex = len(p.messages) - 1
+	}
+	if startIndex < 0 {
+		startIndex = 0
+	}
+
+	// Calculate how many messages can fit by actually measuring their rendered height
+	var visibleMessages []types.MessageInfo
+	currentHeight := 0
+	
+	for i := startIndex; i < len(p.messages); i++ {
+		message := p.messages[i]
+		
+		// Calculate actual height needed for this message
+		messageHeight := p.calculateMessageHeight(message)
+		
+		// Check if adding this message would exceed available height
+		if currentHeight + messageHeight > availableHeight {
+			break
+		}
+		
+		visibleMessages = append(visibleMessages, message)
+		currentHeight += messageHeight
+	}
+
+	// If no messages fit, at least show one message (truncated if necessary)
+	if len(visibleMessages) == 0 && startIndex < len(p.messages) {
+		visibleMessages = append(visibleMessages, p.messages[startIndex])
+	}
+
+	return visibleMessages
+}
+
+// calculateMessageHeight calculates the actual height needed to render a message
+func (p *MessagesPanel) calculateMessageHeight(message types.MessageInfo) int {
+	// Start with base height for borders and padding
+	height := 3 // Top border, bottom border, and padding
+	
+	var content string
+	prefix := ""
+	
+	// Determine prefix based on message type
+	switch message.Type {
+	case "user":
+		prefix = "🧑 You: "
+	case "assistant":
+		prefix = "🤖 Assistant: "
+	case "system":
+		prefix = "⚙️ System: "
+	default:
+		prefix = fmt.Sprintf("%s: ", message.Type)
+	}
+	
+	// Calculate content with prefix
+	if p.markdownMode {
+		// For markdown mode, use util.ToMarkdown to get accurate line count
+		backgroundColor := compat.AdaptiveColor{
+			Light: lipgloss.NoColor{},
+			Dark:  lipgloss.NoColor{},
+		}
+		renderedContent := util.ToMarkdown(message.Content, p.width-len(prefix)-4, backgroundColor)
+		lines := strings.Split(renderedContent, "\n")
+		height += len(lines)
+	} else {
+		// For plain text mode, calculate wrapped lines
+		content = prefix + message.Content
+		if p.width > 4 { // Account for padding and borders
+			wrappedContent := p.wordWrap(content, p.width-4)
+			lines := strings.Split(wrappedContent, "\n")
+			height += len(lines)
+		} else {
+			height += 1 // At least one line
+		}
+	}
+	
+	// Add extra line for timestamp if enabled
+	if p.showTimestamps {
+		// Timestamp is added to first line, so no extra height needed
+	}
+	
+	// Add extra space for status indicators
+	if message.Status == "pending" || message.Status == "error" {
+		// Status indicators are added to last line, so no extra height needed
+	}
+	
+	return height
 }
 
 // renderMessage renders a single message
