@@ -153,6 +153,11 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to p.sessions in handleSessionAdded via the SessionEventMsg flow
 		return p, nil
 
+	case SessionSelectedMsg:
+		log.Printf("Session selected: %s", msg.SessionID)
+		// The session change has already been processed, just trigger UI refresh
+		return p, nil
+
     case SessionEventMsg:
         _, cmd := p.handleSessionEvent(msg.Event)
         return p, tea.Batch(cmd, p.subscribeSessionEvents())
@@ -222,6 +227,9 @@ func (p *SessionsPanel) selectCurrentSession() tea.Cmd {
 	if p.currentIndex >= 0 && p.currentIndex < len(p.sessions) {
 		session := p.sessions[p.currentIndex]
 		log.Printf("[SESSIONS] Selecting session: %s (index: %d)", session.ID, p.currentIndex)
+
+		// Immediately update the local currentSessionID for instant UI feedback
+		p.currentSessionID = session.ID
 
         return func() tea.Msg {
             versionToSend := p.expectedVersion()
