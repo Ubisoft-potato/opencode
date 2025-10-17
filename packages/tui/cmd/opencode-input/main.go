@@ -469,16 +469,26 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return p, nil
 
+	case "space":
+		log.Printf("[INPUT] Space key detected, inserting space character")
+		return p.insertCharacter(" ")
+
 	default:
 		// Handle character input
 		keyStr := msg.String()
 		log.Printf("[INPUT] Key pressed: %q (length: %d, runes: %d)", keyStr, len(keyStr), len([]rune(keyStr)))
 
-		// Check if it's a printable character (including space and Unicode)
+		// Special handling for space key (fallback)
+		if keyStr == " " {
+			log.Printf("[INPUT] Space key detected, inserting space character")
+			return p.insertCharacter(" ")
+		}
+
+		// Check if it's a printable character (including Unicode)
 		runes := []rune(keyStr)
 		if len(runes) == 1 {
 			char := runes[0]
-			// Allow printable characters including space (32) and Unicode characters
+			// Allow printable characters including space (32), tab (9) and Unicode characters
 			if char >= 32 || char == 9 { // 32 = space, 9 = tab
 				log.Printf("[INPUT] Inserting character: %q (Unicode: U+%04X)", keyStr, char)
 				return p.insertCharacter(keyStr)
@@ -651,40 +661,49 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	cmd := parts[0]
 	args := parts[1:]
 
+	// Add to history first
+	p.addToHistory(command)
+	
+	// Clear buffer and cursor position immediately for all commands
+	p.buffer = ""
+	p.cursorPosition = 0
+
+	var cmdToExecute tea.Cmd
+
 	switch cmd {
 	case "/help":
 		// 显示内置帮助视图，而不是发送无处渲染的 InfoMsg
 		p.showHelp = true
 	case "/clear":
-		return p, p.clearMessages()
+		cmdToExecute = p.clearMessages()
 	case "/new":
-		return p, p.createNewSession()
+		cmdToExecute = p.createNewSession()
 	case "/session":
 		if len(args) > 0 {
-			return p, p.switchToSession(args[0])
+			cmdToExecute = p.switchToSession(args[0])
 		}
 	case "/delete":
 		if len(args) > 0 {
-			return p, p.deleteSession(args[0])
+			cmdToExecute = p.deleteSession(args[0])
 		}
 	case "/theme":
 		if len(args) > 0 {
-			return p, p.changeTheme(args[0])
+			cmdToExecute = p.changeTheme(args[0])
 		}
 	case "/model":
 		if len(args) > 1 {
-			return p, p.changeModel(args[0], args[1])
+			cmdToExecute = p.changeModel(args[0], args[1])
 		}
 	case "/agent":
 		if len(args) > 0 {
-			return p, p.changeAgent(args[0])
+			cmdToExecute = p.changeAgent(args[0])
 		}
 	}
 
-	// Add to history
-	p.addToHistory(command)
-	p.buffer = ""
-	p.cursorPosition = 0
+	// Combine input state sync with the command execution
+	if cmdToExecute != nil {
+		return p, tea.Batch(p.syncInputState(), cmdToExecute)
+	}
 
 	return p, p.syncInputState()
 }

@@ -178,32 +178,41 @@ func (fm *FileManager) acquireFileLock() error {
 		return fmt.Errorf("lock already held")
 	}
 
-	// Create lock file
-	lockFile, err := os.OpenFile(fm.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		if os.IsExist(err) {
-			// Lock file exists, check if it's stale
-			return fm.handleStaleLock()
+	// Retry loop for stale lock handling
+	for attempts := 0; attempts < 3; attempts++ {
+		// Create lock file
+		lockFile, err := os.OpenFile(fm.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			if os.IsExist(err) {
+				// Lock file exists, check if it's stale
+				if err := fm.handleStaleLock(); err != nil {
+					return err
+				}
+				// If handleStaleLock returned nil, the stale lock was removed, retry
+				continue
+			}
+			return fmt.Errorf("failed to create lock file: %w", err)
 		}
-		return fmt.Errorf("failed to create lock file: %w", err)
+
+		// Write process ID to lock file
+		if _, err := lockFile.WriteString(fmt.Sprintf("%d", os.Getpid())); err != nil {
+			lockFile.Close()
+			os.Remove(fm.lockPath)
+			return fmt.Errorf("failed to write to lock file: %w", err)
+		}
+
+		// Apply exclusive lock using flock
+		if err := fm.flockFile(lockFile); err != nil {
+			lockFile.Close()
+			os.Remove(fm.lockPath)
+			return fmt.Errorf("failed to flock file: %w", err)
+		}
+
+		fm.fileLock = lockFile
+		return nil
 	}
 
-	// Write process ID to lock file
-	if _, err := lockFile.WriteString(fmt.Sprintf("%d", os.Getpid())); err != nil {
-		lockFile.Close()
-		os.Remove(fm.lockPath)
-		return fmt.Errorf("failed to write to lock file: %w", err)
-	}
-
-	// Apply exclusive lock using flock
-	if err := fm.flockFile(lockFile); err != nil {
-		lockFile.Close()
-		os.Remove(fm.lockPath)
-		return fmt.Errorf("failed to flock file: %w", err)
-	}
-
-	fm.fileLock = lockFile
-	return nil
+	return fmt.Errorf("failed to acquire lock after multiple attempts")
 }
 
 // releaseFileLock releases the file lock
@@ -242,8 +251,10 @@ func (fm *FileManager) handleStaleLock() error {
 		if err := os.Remove(fm.lockPath); err != nil {
 			return fmt.Errorf("failed to remove stale lock: %w", err)
 		}
-		// Retry acquiring lock
-		return fm.acquireFileLock()
+		// Don't recursively call acquireFileLock as it would cause deadlock
+		// Instead, return nil to indicate the stale lock was removed
+		// The caller should retry the lock acquisition
+		return nil
 	}
 
 	return &LockTimeoutError{Path: fm.lockPath, Timeout: fm.lockTimeout}
