@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +27,47 @@ import (
 	"github.com/sst/opencode/internal/util"
 )
 
+// RenderedLine represents a single rendered line with metadata
+type RenderedLine struct {
+	Content     string    `json:"content"`
+	MessageID   string    `json:"message_id"`
+	MessageType string    `json:"message_type"`
+	LineIndex   int       `json:"line_index"`
+	IsFirstLine bool      `json:"is_first_line"`
+	IsLastLine  bool      `json:"is_last_line"`
+}
+
+// MessageRenderCache caches rendered message content
+type MessageRenderCache struct {
+	ContentHash   string         `json:"content_hash"`
+	RenderedLines []RenderedLine `json:"rendered_lines"`
+	Height        int            `json:"height"`
+	Width         int            `json:"width"`
+	Mode          string         `json:"mode"` // "markdown" or "plain"
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+// SessionViewState stores view state for each session
+type SessionViewState struct {
+	ScrollOffset        int       `json:"scroll_offset"`
+	AutoScroll          bool      `json:"auto_scroll"`
+	LastViewTime        time.Time `json:"last_view_time"`
+	LastViewedMessageID string    `json:"last_viewed_message_id"`
+	TotalLines          int       `json:"total_lines"`
+}
+
+// LineBasedRenderer manages line-based rendering and caching
+type LineBasedRenderer struct {
+	renderedLines   []RenderedLine                 `json:"rendered_lines"`
+	lineToMessage   map[int]string                 `json:"line_to_message"`
+	totalLines      int                            `json:"total_lines"`
+	renderCache     map[string]*MessageRenderCache `json:"render_cache"`
+	sessionStates   map[string]*SessionViewState   `json:"session_states"`
+	lastRenderWidth int                            `json:"last_render_width"`
+	cacheHits       int64                          `json:"cache_hits"`
+	cacheMisses     int64                          `json:"cache_misses"`
+}
+
 // MessagesPanel manages the message history panel
 type MessagesPanel struct {
 	client           *opencode.Client
@@ -43,6 +86,7 @@ type MessagesPanel struct {
 	version          int64
 	eventsChan       chan state.StateEvent
 	markdownMode     bool // true for markdown rendering, false for plain text
+	lineRenderer     *LineBasedRenderer
 }
 
 // NewMessagesPanel creates a new messages panel
@@ -60,6 +104,16 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
 		ctx:            ctx,
 		cancel:         cancel,
 		eventsChan:     make(chan state.StateEvent, 64),
+		lineRenderer: &LineBasedRenderer{
+			renderedLines:   make([]RenderedLine, 0),
+			lineToMessage:   make(map[int]string),
+			totalLines:      0,
+			renderCache:     make(map[string]*MessageRenderCache),
+			sessionStates:   make(map[string]*SessionViewState),
+			lastRenderWidth: 0,
+			cacheHits:       0,
+			cacheMisses:     0,
+		},
 	}
 
     // Register event handlers (bridge IPC events into Bubble Tea loop)
@@ -164,15 +218,15 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(p.messages) == 0 {
 			break
 		}
-		// Use dynamic scroll calculation
 		maxScroll := p.calculateMaxScroll()
 		if maxScroll == 0 {
-			// All messages fit, no scrolling needed
+			// All lines fit, no scrolling needed
 			break
 		}
-		
+
 		if p.scrollOffset > 0 {
-			p.scrollOffset = max(0, p.scrollOffset-3)
+			p.scrollOffset = max(0, p.scrollOffset-1) // Single line scroll
+			log.Printf("[MESSAGES] Scrolled up to offset %d", p.scrollOffset)
 		}
 		p.autoScroll = false
 
@@ -180,17 +234,17 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(p.messages) == 0 {
 			break
 		}
-		// Use dynamic scroll calculation
 		maxScroll := p.calculateMaxScroll()
 		if maxScroll == 0 {
-			// All messages fit, no scrolling needed
+			// All lines fit, no scrolling needed
 			break
 		}
-		
+
 		if p.scrollOffset < maxScroll {
-			p.scrollOffset = min(maxScroll, p.scrollOffset+3)
+			p.scrollOffset = min(maxScroll, p.scrollOffset+1) // Single line scroll
+			log.Printf("[MESSAGES] Scrolled down to offset %d", p.scrollOffset)
 		}
-		
+
 		// Re-enable auto scroll if at bottom
 		if p.scrollOffset >= maxScroll {
 			p.autoScroll = true
@@ -204,17 +258,17 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if maxScroll == 0 {
 			break
 		}
-		
+
 		// Calculate available height for messages (excluding header and footer)
 		availableHeight := p.height - 6
 		if availableHeight <= 0 {
 			break
 		}
-		linesPerMessage := 3
-		maxVisibleMessages := availableHeight / linesPerMessage
-		pageSize := max(1, maxVisibleMessages/2)
-		
-		p.scrollOffset = max(0, p.scrollOffset-(pageSize*linesPerMessage))
+
+		// Page up by half the available height
+		pageSize := max(1, availableHeight/2)
+		p.scrollOffset = max(0, p.scrollOffset-pageSize)
+		log.Printf("[MESSAGES] Page up to offset %d (page size=%d)", p.scrollOffset, pageSize)
 		p.autoScroll = false
 
 	case "page_down":
@@ -225,18 +279,18 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if maxScroll == 0 {
 			break
 		}
-		
+
 		// Calculate available height for messages (excluding header and footer)
 		availableHeight := p.height - 6
 		if availableHeight <= 0 {
 			break
 		}
-		linesPerMessage := 3
-		maxVisibleMessages := availableHeight / linesPerMessage
-		pageSize := max(1, maxVisibleMessages/2)
-		
-		p.scrollOffset = min(maxScroll, p.scrollOffset+(pageSize*linesPerMessage))
-		
+
+		// Page down by half the available height
+		pageSize := max(1, availableHeight/2)
+		p.scrollOffset = min(maxScroll, p.scrollOffset+pageSize)
+		log.Printf("[MESSAGES] Page down to offset %d (page size=%d)", p.scrollOffset, pageSize)
+
 		if p.scrollOffset >= maxScroll {
 			p.autoScroll = true
 		}
@@ -251,6 +305,23 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "t":
 		p.showTimestamps = !p.showTimestamps
+		log.Printf("[MESSAGES] Timestamps %s", map[bool]string{true: "enabled", false: "disabled"}[p.showTimestamps])
+
+		// Rebuild rendered lines with timestamp change
+		if len(p.messages) > 0 {
+			mode := "plain"
+			if p.markdownMode {
+				mode = "markdown"
+			}
+			p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+			// Maintain scroll position after timestamp toggle
+			maxScroll := p.calculateMaxScroll()
+			if p.scrollOffset > maxScroll {
+				p.scrollOffset = maxScroll
+			}
+			log.Printf("[MESSAGES] Rebuilt lines for timestamp toggle, adjusted scroll to %d", p.scrollOffset)
+		}
 
 	case "a":
 		p.autoScroll = !p.autoScroll
@@ -263,7 +334,23 @@ func (p *MessagesPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "m":
 		p.markdownMode = !p.markdownMode
-		// No need to return a command, just toggle the mode
+		log.Printf("[MESSAGES] Switched to %s mode", map[bool]string{true: "markdown", false: "plain"}[p.markdownMode])
+
+		// Rebuild rendered lines with new mode
+		if len(p.messages) > 0 {
+			mode := "plain"
+			if p.markdownMode {
+				mode = "markdown"
+			}
+			p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+			// Maintain scroll position after mode switch
+			maxScroll := p.calculateMaxScroll()
+			if p.scrollOffset > maxScroll {
+				p.scrollOffset = maxScroll
+			}
+			log.Printf("[MESSAGES] Rebuilt lines for mode switch, adjusted scroll to %d", p.scrollOffset)
+		}
 	}
 
 	return p, nil
@@ -348,11 +435,24 @@ func (p *MessagesPanel) handleMessageAdded(event state.StateEvent) error {
         if err := decodePayload(payloadMap, &payload); err == nil {
             if payload.Message.SessionID == p.currentSessionID {
                 p.messages = append(p.messages, payload.Message)
+
+                // Rebuild rendered lines with the new message
+                mode := "plain"
+                if p.markdownMode {
+                    mode = "markdown"
+                }
+                p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+                // Auto-scroll to bottom if enabled
                 if p.autoScroll {
                     p.scrollToBottom()
+                    log.Printf("[MESSAGES] Auto-scrolled to bottom for new message")
                 }
+
+                // Clean up cache periodically
+                p.lineRenderer.cleanupCache()
             }
-            log.Printf("[MESSAGES] v%v Message added: %s", event.Version, payload.Message.ID)
+            log.Printf("[MESSAGES] v%v Message added: %s (session=%s)", event.Version, payload.Message.ID, payload.Message.SessionID)
         }
     }
     return nil
@@ -363,19 +463,38 @@ func (p *MessagesPanel) handleMessageUpdated(event state.StateEvent) error {
     if payloadMap, ok := event.Data.(map[string]interface{}); ok {
         var payload types.MessageUpdatePayload
         if err := decodePayload(payloadMap, &payload); err == nil {
+            messageUpdated := false
             for i, message := range p.messages {
                 if message.ID == payload.MessageID {
                     if payload.Content != "" {
                         p.messages[i].Content = payload.Content
+                        messageUpdated = true
                     }
                     if payload.Status != "" {
                         p.messages[i].Status = payload.Status
+                        messageUpdated = true
                     }
                     p.messages[i].Timestamp = time.Now()
                     break
                 }
             }
-            log.Printf("[MESSAGES] v%v Message updated: %s", event.Version, payload.MessageID)
+
+            // Rebuild rendered lines if message content changed
+            if messageUpdated {
+                mode := "plain"
+                if p.markdownMode {
+                    mode = "markdown"
+                }
+                p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+                // Auto-scroll to bottom if enabled and this is a streaming update
+                if p.autoScroll && payload.Status == "pending" {
+                    p.scrollToBottom()
+                    log.Printf("[MESSAGES] Auto-scrolled for streaming update")
+                }
+            }
+
+            log.Printf("[MESSAGES] v%v Message updated: %s (content changed: %t)", event.Version, payload.MessageID, messageUpdated)
         }
     }
     return nil
@@ -403,15 +522,37 @@ func (p *MessagesPanel) handleSessionChanged(event state.StateEvent) error {
     if payloadMap, ok := event.Data.(map[string]interface{}); ok {
         var payload types.SessionChangePayload
         if err := decodePayload(payloadMap, &payload); err == nil {
-            log.Printf("[MESSAGES] v%v Session changed to: %s", event.Version, payload.SessionID)
+            log.Printf("[MESSAGES] v%v Session changed from %s to: %s", event.Version, p.currentSessionID, payload.SessionID)
+
+            // Save current session state before switching
+            if p.currentSessionID != "" && len(p.messages) > 0 {
+                lastMessageID := ""
+                if len(p.messages) > 0 {
+                    lastMessageID = p.messages[len(p.messages)-1].ID
+                }
+                p.lineRenderer.saveSessionState(p.currentSessionID, p.scrollOffset, p.autoScroll, lastMessageID)
+                log.Printf("[MESSAGES] Saved state for session %s", p.currentSessionID)
+            }
+
+            // Switch to new session
+            oldSessionID := p.currentSessionID
             p.currentSessionID = payload.SessionID
-            p.scrollOffset = 0
+
+            // Try to restore state for the new session
+            sessionState := p.lineRenderer.getSessionState(p.currentSessionID)
+            if sessionState != nil && oldSessionID != p.currentSessionID {
+                log.Printf("[MESSAGES] Restoring state for session %s: offset=%d, autoScroll=%t",
+                    p.currentSessionID, sessionState.ScrollOffset, sessionState.AutoScroll)
+            }
 
             // Fetch messages for the new session
             messages, err := p.client.Session.Messages(p.ctx, p.currentSessionID, opencode.SessionMessagesParams{})
             if err != nil {
                 log.Printf("[MESSAGES] Error fetching messages for session %s: %v", p.currentSessionID, err)
                 p.messages = make([]types.MessageInfo, 0) // Clear messages on error
+                // Reset to default state
+                p.scrollOffset = 0
+                p.autoScroll = true
                 return nil
             }
 
@@ -462,8 +603,45 @@ func (p *MessagesPanel) handleSessionChanged(event state.StateEvent) error {
 
             log.Printf("[MESSAGES] v%v Fetched %d messages for session %s", event.Version, len(messageInfos), p.currentSessionID)
             p.messages = messageInfos
-            if p.autoScroll {
+
+            // Rebuild rendered lines for the new messages
+            mode := "plain"
+            if p.markdownMode {
+                mode = "markdown"
+            }
+            p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+            // Restore session state or use defaults
+            sessionState = p.lineRenderer.getSessionState(p.currentSessionID)
+            if sessionState != nil && len(p.messages) > 0 {
+                // Check if there are new messages since last view
+                hasNewMessages := false
+                if sessionState.LastViewedMessageID != "" && len(p.messages) > 0 {
+                    lastMessage := p.messages[len(p.messages)-1]
+                    if lastMessage.ID != sessionState.LastViewedMessageID {
+                        hasNewMessages = true
+                        log.Printf("[MESSAGES] New messages detected since last view")
+                    }
+                }
+
+                // Restore scroll position and auto-scroll state
+                p.autoScroll = sessionState.AutoScroll
+
+                // If user was at bottom and there are new messages, stay at bottom
+                if sessionState.AutoScroll && hasNewMessages {
+                    p.scrollToBottom()
+                    log.Printf("[MESSAGES] Auto-scrolled to bottom due to new messages")
+                } else {
+                    // Restore previous scroll position, but validate it
+                    maxScroll := p.calculateMaxScroll()
+                    p.scrollOffset = min(sessionState.ScrollOffset, maxScroll)
+                    log.Printf("[MESSAGES] Restored scroll offset to %d (max=%d)", p.scrollOffset, maxScroll)
+                }
+            } else {
+                // Default behavior for new sessions
+                p.autoScroll = true
                 p.scrollToBottom()
+                log.Printf("[MESSAGES] Using default state for new session")
             }
         }
     }
@@ -586,56 +764,21 @@ func (p *MessagesPanel) filterMessagesForSession(messages []types.MessageInfo, s
 	return filtered
 }
 
-// calculateMaxScroll calculates the maximum scroll offset
+// calculateMaxScroll calculates the maximum scroll offset using line-based calculation
 func (p *MessagesPanel) calculateMaxScroll() int {
-	if len(p.messages) == 0 {
-		return 0
-	}
-
 	// Calculate available height for messages (excluding header and footer)
-	// Account for: header (2 lines), scroll indicator (2 lines), help text (2 lines)
 	availableHeight := p.height - 6
 	if availableHeight <= 0 {
+		log.Printf("[MESSAGES] No available height for scroll calculation (height=%d)", p.height)
 		return 0
 	}
 
-	// Calculate total height needed for all messages
-	totalHeight := 0
-	for _, message := range p.messages {
-		totalHeight += p.calculateMessageHeight(message)
-	}
-	
-	// If all messages fit, no scrolling needed
-	if totalHeight <= availableHeight {
-		return 0
-	}
-	
-	// Calculate the maximum scroll offset by finding how much we need to scroll
-	// to show the last messages that fit in the available height
-	maxScroll := 0
-	
-	// Start from the beginning and find the scroll offset where
-	// the remaining messages from that point fit in available height
-	for i := 0; i < len(p.messages); i++ {
-		// Calculate height of remaining messages from this point
-		remainingHeight := 0
-		for j := i; j < len(p.messages); j++ {
-			remainingHeight += p.calculateMessageHeight(p.messages[j])
-		}
-		
-		// If remaining messages fit, this is our max scroll position
-		if remainingHeight <= availableHeight {
-			maxScroll = i * 3 // Convert message index to line-based offset
-			break
-		}
-	}
-	
-	// Ensure we don't scroll beyond the last message
-	maxScrollLimit := (len(p.messages) - 1) * 3
-	if maxScroll > maxScrollLimit {
-		maxScroll = maxScrollLimit
-	}
-	
+	// Use the line renderer to calculate max scroll offset
+	maxScroll := p.lineRenderer.calculateMaxScrollOffset(availableHeight)
+
+	log.Printf("[MESSAGES] Calculated max scroll: %d (total lines=%d, available height=%d)",
+		maxScroll, p.lineRenderer.totalLines, availableHeight)
+
 	return maxScroll
 }
 
@@ -660,9 +803,10 @@ func (p *MessagesPanel) renderEmptyState() string {
 	return style.Render("No messages in this session\n\nStart a conversation in the input panel")
 }
 
-// renderMessages renders the list of messages
+// renderMessages renders the list of messages using line-based rendering
 func (p *MessagesPanel) renderMessages() string {
 	t := theme.CurrentTheme()
+	log.Printf("[MESSAGES] Starting renderMessages (width=%d, height=%d, offset=%d)", p.width, p.height, p.scrollOffset)
 
 	var content string
 
@@ -675,35 +819,55 @@ func (p *MessagesPanel) renderMessages() string {
 		header += " [STREAMING]"
 	}
 
+	// Add cache stats to header in debug mode
+	hits, misses, hitRate := p.lineRenderer.getCacheStats()
+	if hits+misses > 0 {
+		header += fmt.Sprintf(" [Cache: %.1f%%]", hitRate)
+	}
+
 	content += styles.NewStyle().
 		Foreground(t.Primary()).
 		Bold(true).
 		Render(header) + "\n\n"
 
-	// Calculate visible messages based on scroll
-	visibleMessages := p.calculateVisibleMessages()
+	// Calculate visible lines using line-based rendering
+	visibleLines := p.calculateVisibleLines()
 
-	for _, message := range visibleMessages {
-		content += p.renderMessage(message) + "\n"
+	log.Printf("[MESSAGES] Rendering %d visible lines", len(visibleLines))
+
+	// Render visible lines directly
+	for _, line := range visibleLines {
+		// Apply styling based on message type
+		var lineStyle styles.Style
+		switch line.MessageType {
+		case "user":
+			lineStyle = styles.NewStyle().Foreground(t.Text())
+		case "assistant":
+			lineStyle = styles.NewStyle().Foreground(t.Text())
+		case "system":
+			lineStyle = styles.NewStyle().Foreground(t.TextMuted())
+		default:
+			lineStyle = styles.NewStyle().Foreground(t.Text())
+		}
+
+		content += lineStyle.Render(line.Content) + "\n"
 	}
 
 	// Footer with scroll indicator
-	if p.calculateMaxScroll() > 0 {
-		currentMessageIndex := (p.scrollOffset / 3) + 1 // Convert scroll offset to message number
-		totalMessages := len(p.messages)
-		// Show which message range is currently visible
-		availableHeight := p.height - 4
-		linesPerMessage := 3
-		maxVisibleMessages := availableHeight / linesPerMessage
-		endMessageIndex := min(currentMessageIndex+maxVisibleMessages-1, totalMessages)
-		
+	maxScroll := p.calculateMaxScroll()
+	if maxScroll > 0 {
+		currentLine := p.scrollOffset + 1
+		totalLines := p.lineRenderer.totalLines
+		availableHeight := p.height - 6
+		endLine := min(currentLine+availableHeight-1, totalLines)
+
 		var scrollIndicator string
-		if maxVisibleMessages == 1 {
-			scrollIndicator = fmt.Sprintf("[%d/%d]", currentMessageIndex, totalMessages)
+		if availableHeight == 1 {
+			scrollIndicator = fmt.Sprintf("[Line %d/%d]", currentLine, totalLines)
 		} else {
-			scrollIndicator = fmt.Sprintf("[%d-%d/%d]", currentMessageIndex, endMessageIndex, totalMessages)
+			scrollIndicator = fmt.Sprintf("[Lines %d-%d/%d]", currentLine, endLine, totalLines)
 		}
-		
+
 		if !p.autoScroll {
 			scrollIndicator += " [MANUAL]"
 		}
@@ -724,57 +888,43 @@ func (p *MessagesPanel) renderMessages() string {
 		Foreground(t.TextMuted()).
 		Render(fmt.Sprintf("↑/k up • ↓/j down • PgUp/PgDn page • Home/End • t timestamps • a auto-scroll • m mode(%s) • r refresh • q quit", modeText))
 
+	log.Printf("[MESSAGES] Completed renderMessages")
 	return content
 }
 
-// calculateVisibleMessages returns messages visible in the current scroll view
-func (p *MessagesPanel) calculateVisibleMessages() []types.MessageInfo {
+// calculateVisibleLines returns lines visible in the current scroll view using line-based rendering
+func (p *MessagesPanel) calculateVisibleLines() []RenderedLine {
 	if len(p.messages) == 0 {
-		return []types.MessageInfo{}
+		log.Printf("[MESSAGES] No messages to display")
+		return []RenderedLine{}
 	}
 
 	// Calculate available height for messages (excluding header and footer)
 	// Account for: header (2 lines), scroll indicator (2 lines), help text (2 lines)
 	availableHeight := p.height - 6
 	if availableHeight <= 0 {
-		return []types.MessageInfo{}
+		log.Printf("[MESSAGES] No available height for messages (height=%d)", p.height)
+		return []RenderedLine{}
 	}
 
-	// Calculate start index based on scroll offset
-	// Use message-based scrolling instead of line-based
-	startIndex := p.scrollOffset / 3 // Convert line offset to message offset
-	if startIndex >= len(p.messages) {
-		startIndex = len(p.messages) - 1
-	}
-	if startIndex < 0 {
-		startIndex = 0
+	// Check if we need to rebuild rendered lines (width change or first time)
+	mode := "plain"
+	if p.markdownMode {
+		mode = "markdown"
 	}
 
-	// Calculate how many messages can fit by actually measuring their rendered height
-	var visibleMessages []types.MessageInfo
-	currentHeight := 0
-	
-	for i := startIndex; i < len(p.messages); i++ {
-		message := p.messages[i]
-		
-		// Calculate actual height needed for this message
-		messageHeight := p.calculateMessageHeight(message)
-		
-		// Check if adding this message would exceed available height
-		if currentHeight + messageHeight > availableHeight {
-			break
-		}
-		
-		visibleMessages = append(visibleMessages, message)
-		currentHeight += messageHeight
+	if p.lineRenderer.lastRenderWidth != p.width || len(p.lineRenderer.renderedLines) == 0 {
+		log.Printf("[MESSAGES] Rebuilding lines due to width change: %d -> %d", p.lineRenderer.lastRenderWidth, p.width)
+		p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
 	}
 
-	// If no messages fit, at least show one message (truncated if necessary)
-	if len(visibleMessages) == 0 && startIndex < len(p.messages) {
-		visibleMessages = append(visibleMessages, p.messages[startIndex])
-	}
+	// Get visible lines using the line-based renderer
+	visibleLines := p.lineRenderer.getVisibleLines(p.scrollOffset, availableHeight)
 
-	return visibleMessages
+	log.Printf("[MESSAGES] Calculated %d visible lines (offset=%d, height=%d, total=%d)",
+		len(visibleLines), p.scrollOffset, availableHeight, p.lineRenderer.totalLines)
+
+	return visibleLines
 }
 
 // calculateMessageHeight calculates the actual height needed to render a message
@@ -1042,6 +1192,297 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// LineBasedRenderer methods
+
+// generateContentHash creates a hash for caching purposes
+func (lr *LineBasedRenderer) generateContentHash(message types.MessageInfo, width int, mode string, showTimestamps bool) string {
+	content := fmt.Sprintf("%s|%s|%d|%s|%t|%s", message.ID, message.Content, width, mode, showTimestamps, message.Type)
+	hash := md5.Sum([]byte(content))
+	return hex.EncodeToString(hash[:])
+}
+
+// renderMessageToLines converts a message to a list of rendered lines
+func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, width int, mode string, showTimestamps bool) []RenderedLine {
+	log.Printf("[RENDERER] Rendering message %s (type=%s, mode=%s, width=%d)", message.ID, message.Type, mode, width)
+
+	contentHash := lr.generateContentHash(message, width, mode, showTimestamps)
+
+	// Check cache first
+	if cached, exists := lr.renderCache[contentHash]; exists {
+		lr.cacheHits++
+		log.Printf("[RENDERER] Cache hit for message %s (hash=%s)", message.ID, contentHash[:8])
+		return cached.RenderedLines
+	}
+
+	lr.cacheMisses++
+	log.Printf("[RENDERER] Cache miss for message %s (hash=%s)", message.ID, contentHash[:8])
+
+	var lines []RenderedLine
+	var renderedContent string
+
+	// Determine prefix based on message type
+	var prefix string
+	switch message.Type {
+	case "user":
+		prefix = "🧑 You: "
+	case "assistant":
+		prefix = "🤖 Assistant: "
+	case "system":
+		prefix = "⚙️ System: "
+	default:
+		prefix = fmt.Sprintf("%s: ", message.Type)
+	}
+
+	if mode == "markdown" {
+		// Use transparent background for code blocks
+		backgroundColor := compat.AdaptiveColor{
+			Light: lipgloss.NoColor{},
+			Dark:  lipgloss.NoColor{},
+		}
+
+		// Render the message content as markdown
+		renderedContent = util.ToMarkdown(message.Content, width-len(prefix)-4, backgroundColor)
+
+		// Split into lines and add prefix
+		contentLines := strings.Split(renderedContent, "\n")
+		for i, line := range contentLines {
+			var finalLine string
+			if i == 0 {
+				finalLine = prefix + line
+			} else {
+				// Indent continuation lines to align with content
+				finalLine = strings.Repeat(" ", len(prefix)) + line
+			}
+
+			// Add timestamp if enabled and this is the first line
+			if showTimestamps && i == 0 {
+				timestamp := message.Timestamp.Format("15:04:05")
+				finalLine = fmt.Sprintf("[%s] %s", timestamp, finalLine)
+			}
+
+			lines = append(lines, RenderedLine{
+				Content:     finalLine,
+				MessageID:   message.ID,
+				MessageType: message.Type,
+				LineIndex:   i,
+				IsFirstLine: i == 0,
+				IsLastLine:  i == len(contentLines)-1,
+			})
+		}
+	} else {
+		// Plain text mode
+		content := prefix + message.Content
+
+		// Add timestamp if enabled
+		if showTimestamps {
+			timestamp := message.Timestamp.Format("15:04:05")
+			content = fmt.Sprintf("[%s] %s", timestamp, content)
+		}
+
+		// Word wrap content to fit width
+		if width > 4 {
+			content = lr.wordWrap(content, width-4)
+		}
+
+		contentLines := strings.Split(content, "\n")
+		for i, line := range contentLines {
+			lines = append(lines, RenderedLine{
+				Content:     line,
+				MessageID:   message.ID,
+				MessageType: message.Type,
+				LineIndex:   i,
+				IsFirstLine: i == 0,
+				IsLastLine:  i == len(contentLines)-1,
+			})
+		}
+	}
+
+	// Add status indicator for pending messages on the last line
+	if len(lines) > 0 {
+		lastIndex := len(lines) - 1
+		if message.Status == "pending" {
+			lines[lastIndex].Content += " ⏳"
+		} else if message.Status == "error" {
+			lines[lastIndex].Content += " ❌"
+		}
+	}
+
+	// Cache the result
+	lr.renderCache[contentHash] = &MessageRenderCache{
+		ContentHash:   contentHash,
+		RenderedLines: lines,
+		Height:        len(lines),
+		Width:         width,
+		Mode:          mode,
+		CreatedAt:     time.Now(),
+	}
+
+	log.Printf("[RENDERER] Rendered message %s into %d lines", message.ID, len(lines))
+	return lines
+}
+
+// wordWrap wraps text to fit within specified width (helper method)
+func (lr *LineBasedRenderer) wordWrap(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+
+	var lines []string
+	var currentLine string
+
+	for _, word := range words {
+		if len(currentLine)+len(word)+1 <= width {
+			if currentLine == "" {
+				currentLine = word
+			} else {
+				currentLine += " " + word
+			}
+		} else {
+			if currentLine != "" {
+				lines = append(lines, currentLine)
+			}
+			currentLine = word
+		}
+	}
+
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// rebuildRenderedLines rebuilds the complete rendered lines list from messages
+func (lr *LineBasedRenderer) rebuildRenderedLines(messages []types.MessageInfo, width int, mode string, showTimestamps bool) {
+	log.Printf("[RENDERER] Rebuilding rendered lines for %d messages (width=%d, mode=%s)", len(messages), width, mode)
+
+	lr.renderedLines = make([]RenderedLine, 0)
+	lr.lineToMessage = make(map[int]string)
+	lr.totalLines = 0
+
+	lineIndex := 0
+	for _, message := range messages {
+		messageLines := lr.renderMessageToLines(message, width, mode, showTimestamps)
+
+		// Update line indices and add to global list
+		for i, line := range messageLines {
+			line.LineIndex = lineIndex + i
+			lr.renderedLines = append(lr.renderedLines, line)
+			lr.lineToMessage[lineIndex+i] = message.ID
+		}
+
+		lineIndex += len(messageLines)
+	}
+
+	lr.totalLines = lineIndex
+	lr.lastRenderWidth = width
+
+	log.Printf("[RENDERER] Rebuilt %d total lines from %d messages", lr.totalLines, len(messages))
+}
+
+// getVisibleLines returns the lines that should be visible based on scroll offset and available height
+func (lr *LineBasedRenderer) getVisibleLines(scrollOffset int, availableHeight int) []RenderedLine {
+	if len(lr.renderedLines) == 0 || availableHeight <= 0 {
+		return []RenderedLine{}
+	}
+
+	startLine := scrollOffset
+	if startLine < 0 {
+		startLine = 0
+	}
+	if startLine >= lr.totalLines {
+		startLine = lr.totalLines - 1
+	}
+
+	endLine := startLine + availableHeight
+	if endLine > lr.totalLines {
+		endLine = lr.totalLines
+	}
+
+	log.Printf("[RENDERER] Getting visible lines: offset=%d, height=%d, start=%d, end=%d, total=%d",
+		scrollOffset, availableHeight, startLine, endLine, lr.totalLines)
+
+	if startLine >= endLine {
+		return []RenderedLine{}
+	}
+
+	return lr.renderedLines[startLine:endLine]
+}
+
+// calculateMaxScrollOffset calculates the maximum scroll offset for the current content
+func (lr *LineBasedRenderer) calculateMaxScrollOffset(availableHeight int) int {
+	if lr.totalLines <= availableHeight {
+		return 0
+	}
+	return lr.totalLines - availableHeight
+}
+
+// getSessionState gets or creates session view state
+func (lr *LineBasedRenderer) getSessionState(sessionID string) *SessionViewState {
+	if state, exists := lr.sessionStates[sessionID]; exists {
+		return state
+	}
+
+	// Create new session state
+	state := &SessionViewState{
+		ScrollOffset:        0,
+		AutoScroll:          true,
+		LastViewTime:        time.Now(),
+		LastViewedMessageID: "",
+		TotalLines:          0,
+	}
+	lr.sessionStates[sessionID] = state
+
+	log.Printf("[RENDERER] Created new session state for %s", sessionID)
+	return state
+}
+
+// saveSessionState updates the session state
+func (lr *LineBasedRenderer) saveSessionState(sessionID string, scrollOffset int, autoScroll bool, lastMessageID string) {
+	state := lr.getSessionState(sessionID)
+	state.ScrollOffset = scrollOffset
+	state.AutoScroll = autoScroll
+	state.LastViewTime = time.Now()
+	state.LastViewedMessageID = lastMessageID
+	state.TotalLines = lr.totalLines
+
+	log.Printf("[RENDERER] Saved session state for %s: offset=%d, autoScroll=%t, lines=%d",
+		sessionID, scrollOffset, autoScroll, lr.totalLines)
+}
+
+// cleanupCache removes old cache entries to prevent memory growth
+func (lr *LineBasedRenderer) cleanupCache() {
+	if len(lr.renderCache) < 100 {
+		return
+	}
+
+	now := time.Now()
+	maxAge := 10 * time.Minute
+
+	for hash, cache := range lr.renderCache {
+		if now.Sub(cache.CreatedAt) > maxAge {
+			delete(lr.renderCache, hash)
+		}
+	}
+
+	log.Printf("[RENDERER] Cleaned up cache, now %d entries", len(lr.renderCache))
+}
+
+// getCacheStats returns cache performance statistics
+func (lr *LineBasedRenderer) getCacheStats() (hits int64, misses int64, hitRate float64) {
+	total := lr.cacheHits + lr.cacheMisses
+	if total == 0 {
+		return lr.cacheHits, lr.cacheMisses, 0.0
+	}
+	hitRate = float64(lr.cacheHits) / float64(total) * 100.0
+	return lr.cacheHits, lr.cacheMisses, hitRate
 }
 
 func main() {
