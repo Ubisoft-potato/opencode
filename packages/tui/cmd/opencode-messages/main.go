@@ -29,12 +29,15 @@ import (
 
 // RenderedLine represents a single rendered line with metadata
 type RenderedLine struct {
-	Content     string    `json:"content"`
-	MessageID   string    `json:"message_id"`
-	MessageType string    `json:"message_type"`
-	LineIndex   int       `json:"line_index"`
-	IsFirstLine bool      `json:"is_first_line"`
-	IsLastLine  bool      `json:"is_last_line"`
+	Content         string    `json:"content"`
+	MessageID       string    `json:"message_id"`
+	MessageType     string    `json:"message_type"`
+	LineIndex       int       `json:"line_index"`
+	IsFirstLine     bool      `json:"is_first_line"`
+	IsLastLine      bool      `json:"is_last_line"`
+	IsSeparator     bool      `json:"is_separator"`     // Line used for spacing between messages
+	NeedsBackground bool      `json:"needs_background"` // Line needs background color (for user messages)
+	BackgroundWidth int       `json:"background_width"` // Calculated width for background rendering
 }
 
 // MessageRenderCache caches rendered message content
@@ -837,17 +840,36 @@ func (p *MessagesPanel) renderMessages() string {
 
 	// Render visible lines directly
 	for _, line := range visibleLines {
-		// Apply styling based on message type
+		// Skip rendering separator lines but preserve their space
+		if line.IsSeparator {
+			content += "\n"
+			continue
+		}
+
+		// Apply styling based on message type and background needs
 		var lineStyle styles.Style
-		switch line.MessageType {
-		case "user":
-			lineStyle = styles.NewStyle().Foreground(t.Text())
-		case "assistant":
-			lineStyle = styles.NewStyle().Foreground(t.Text())
-		case "system":
-			lineStyle = styles.NewStyle().Foreground(t.TextMuted())
-		default:
-			lineStyle = styles.NewStyle().Foreground(t.Text())
+		if line.NeedsBackground {
+			// User messages: background already applied in markdown rendering
+			// Just apply width and padding for consistent layout
+			contentWidth := line.BackgroundWidth
+			if contentWidth <= 0 {
+				contentWidth = max(p.width-4, 60) // Fallback: generous width
+			}
+
+			// Use basic styling without background (already handled by markdown renderer)
+			lineStyle = styles.NewStyle().
+				Width(contentWidth).
+				Align(styles.Left)
+		} else {
+			// Other messages use normal styling
+			switch line.MessageType {
+			case "assistant":
+				lineStyle = styles.NewStyle().Foreground(t.Text())
+			case "system":
+				lineStyle = styles.NewStyle().Foreground(t.TextMuted())
+			default:
+				lineStyle = styles.NewStyle().Foreground(t.Text())
+			}
 		}
 
 		content += lineStyle.Render(line.Content) + "\n"
@@ -1236,10 +1258,18 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 	}
 
 	if mode == "markdown" {
-		// Use transparent background for code blocks
-		backgroundColor := compat.AdaptiveColor{
-			Light: lipgloss.NoColor{},
-			Dark:  lipgloss.NoColor{},
+		// Set background color based on message type
+		var backgroundColor compat.AdaptiveColor
+		if message.Type == "user" {
+			// User messages use theme background for consistent styling
+			t := theme.CurrentTheme()
+			backgroundColor = t.BackgroundElement()
+		} else {
+			// Other messages use transparent background for code blocks
+			backgroundColor = compat.AdaptiveColor{
+				Light: lipgloss.NoColor{},
+				Dark:  lipgloss.NoColor{},
+			}
 		}
 
 		// Render the message content as markdown
@@ -1262,13 +1292,24 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 				finalLine = fmt.Sprintf("[%s] %s", timestamp, finalLine)
 			}
 
+			// Calculate background width for user messages
+			backgroundWidth := 0
+			if message.Type == "user" {
+				// Use more generous width calculation for better coverage
+				// Take 90% of available width with reasonable minimum
+				backgroundWidth = max(width*9/10, 60)
+			}
+
 			lines = append(lines, RenderedLine{
-				Content:     finalLine,
-				MessageID:   message.ID,
-				MessageType: message.Type,
-				LineIndex:   i,
-				IsFirstLine: i == 0,
-				IsLastLine:  i == len(contentLines)-1,
+				Content:         finalLine,
+				MessageID:       message.ID,
+				MessageType:     message.Type,
+				LineIndex:       i,
+				IsFirstLine:     i == 0,
+				IsLastLine:      i == len(contentLines)-1,
+				IsSeparator:     false,
+				NeedsBackground: message.Type == "user", // User messages get background
+				BackgroundWidth: backgroundWidth,
 			})
 		}
 	} else {
@@ -1288,13 +1329,24 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 
 		contentLines := strings.Split(content, "\n")
 		for i, line := range contentLines {
+			// Calculate background width for user messages
+			backgroundWidth := 0
+			if message.Type == "user" {
+				// Use more generous width calculation for better coverage
+				// Take 90% of available width with reasonable minimum
+				backgroundWidth = max(width*9/10, 60)
+			}
+
 			lines = append(lines, RenderedLine{
-				Content:     line,
-				MessageID:   message.ID,
-				MessageType: message.Type,
-				LineIndex:   i,
-				IsFirstLine: i == 0,
-				IsLastLine:  i == len(contentLines)-1,
+				Content:         line,
+				MessageID:       message.ID,
+				MessageType:     message.Type,
+				LineIndex:       i,
+				IsFirstLine:     i == 0,
+				IsLastLine:      i == len(contentLines)-1,
+				IsSeparator:     false,
+				NeedsBackground: message.Type == "user", // User messages get background
+				BackgroundWidth: backgroundWidth,
 			})
 		}
 	}
@@ -1368,7 +1420,7 @@ func (lr *LineBasedRenderer) rebuildRenderedLines(messages []types.MessageInfo, 
 	lr.totalLines = 0
 
 	lineIndex := 0
-	for _, message := range messages {
+	for messageIdx, message := range messages {
 		messageLines := lr.renderMessageToLines(message, width, mode, showTimestamps)
 
 		// Update line indices and add to global list
@@ -1379,6 +1431,26 @@ func (lr *LineBasedRenderer) rebuildRenderedLines(messages []types.MessageInfo, 
 		}
 
 		lineIndex += len(messageLines)
+
+		// Add separator lines between messages (except after the last message)
+		// Use 2 empty lines for better visual separation
+		if messageIdx < len(messages)-1 {
+			for i := 0; i < 2; i++ {
+				separatorLine := RenderedLine{
+					Content:         "",
+					MessageID:       "",
+					MessageType:     "separator",
+					LineIndex:       lineIndex,
+					IsFirstLine:     false,
+					IsLastLine:      false,
+					IsSeparator:     true,
+					NeedsBackground: false,
+					BackgroundWidth: 0,
+				}
+				lr.renderedLines = append(lr.renderedLines, separatorLine)
+				lineIndex++
+			}
+		}
 	}
 
 	lr.totalLines = lineIndex
