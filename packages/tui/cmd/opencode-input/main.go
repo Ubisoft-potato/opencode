@@ -1316,8 +1316,10 @@ func (p *InputPanel) changeAgent(agent string) tea.Cmd {
 // cycleTheme cycles through comfortable themes
 // handleModelDialogKeys handles keyboard input when model selection dialog is active
 func (p *InputPanel) handleModelDialogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "escape":
+	keyStr := msg.String()
+
+	switch keyStr {
+	case "escape", "esc", "ctrl+c":
 		// Close model dialog
 		p.showModelDialog = false
 		p.mode = "normal"
@@ -1403,6 +1405,17 @@ func (p *InputPanel) handleModelDialogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 			p.modelScrollOffset = 0
 			return p, nil
 		}
+
+		// Special handling for ESC key variants that might not match the case above
+		if strings.Contains(strings.ToLower(keyStr), "esc") {
+			log.Printf("[MODEL_DIALOG] ESC variant detected - closing dialog")
+			p.showModelDialog = false
+			p.mode = "normal"
+			log.Printf("[MODEL_DIALOG] After ESC variant - showModelDialog: %v, mode: %s", p.showModelDialog, p.mode)
+			return p, nil
+		}
+
+		log.Printf("[MODEL_DIALOG] Unhandled key: %q", keyStr)
 	}
 
 	return p, nil
