@@ -1,16 +1,16 @@
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "os"
-    "os/signal"
-    "path/filepath"
-    "strings"
-    "syscall"
-    "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/sst/opencode-sdk-go"
@@ -24,30 +24,30 @@ import (
 
 // InputPanel manages the user input panel
 type InputPanel struct {
-	client           *opencode.Client
-	ipcClient        *ipc.SocketClient
-	buffer           string
-	cursorPosition   int
-	selectionStart   int
-	selectionEnd     int
-	mode             string // "normal", "command", "multiline"
-	history          []string
-	historyIndex     int
-	currentSessionID string
+	client              *opencode.Client
+	ipcClient           *ipc.SocketClient
+	buffer              string
+	cursorPosition      int
+	selectionStart      int
+	selectionEnd        int
+	mode                string // "normal", "command", "multiline"
+	history             []string
+	historyIndex        int
+	currentSessionID    string
 	currentSessionTitle string // Add field to store session title
-	width            int
-	height           int
-	ctx              context.Context
-	cancel           context.CancelFunc
-	isMultiline      bool
-	showHelp         bool
-	lastCommand      string
-    version          int64
-    cachedState      *state.SharedApplicationState // Cache the state locally
-    program          *tea.Program // Reference to the program for triggering updates
+	width               int
+	height              int
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	isMultiline         bool
+	showHelp            bool
+	lastCommand         string
+	version             int64
+	cachedState         *state.SharedApplicationState // Cache the state locally
+	program             *tea.Program                  // Reference to the program for triggering updates
 	// Scroll state for help content
-	helpScrollOffset int    // Current scroll position in help content
-	helpScrollMode   bool   // Whether we're in help scroll mode
+	helpScrollOffset int      // Current scroll position in help content
+	helpScrollMode   bool     // Whether we're in help scroll mode
 	helpLines        []string // Cached help lines for scrolling
 	// Theme switching state
 	comfortableThemes []string // List of comfortable themes for cycling
@@ -60,7 +60,7 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 
 	// Define comfortable themes for cycling
 	comfortableThemes := []string{"dracula", "gruvbox", "tokyonight", "catppuccin", "nord", "rosepine"}
-	
+
 	// Find current theme index
 	currentTheme := theme.CurrentThemeName()
 	currentIndex := 0
@@ -72,33 +72,33 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 	}
 
 	panel := &InputPanel{
-		client:         httpClient,
-		ipcClient:      ipc.NewSocketClient(socketPath, "input-panel", "input"),
-		buffer:         "",
-		cursorPosition: 0,
-		selectionStart: 0,
-		selectionEnd:   0,
-		mode:           "normal",
-		history:        make([]string, 0),
-		historyIndex:   -1,
-		ctx:            ctx,
-		cancel:         cancel,
-		isMultiline:    false,
-		showHelp:       false,
-		helpScrollOffset: 0,
-		helpScrollMode:   false,
-		helpLines:        make([]string, 0),
+		client:            httpClient,
+		ipcClient:         ipc.NewSocketClient(socketPath, "input-panel", "input"),
+		buffer:            "",
+		cursorPosition:    0,
+		selectionStart:    0,
+		selectionEnd:      0,
+		mode:              "normal",
+		history:           make([]string, 0),
+		historyIndex:      -1,
+		ctx:               ctx,
+		cancel:            cancel,
+		isMultiline:       false,
+		showHelp:          false,
+		helpScrollOffset:  0,
+		helpScrollMode:    false,
+		helpLines:         make([]string, 0),
 		comfortableThemes: comfortableThemes,
 		currentThemeIndex: currentIndex,
 	}
 
-    // Register event handlers
-    panel.ipcClient.RegisterEventHandler(state.EventInputUpdated, panel.handleInputUpdated)
-    panel.ipcClient.RegisterEventHandler(state.EventCursorMoved, panel.handleCursorMoved)
-    panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.handleSessionChanged)
-    panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.handleStateSync)
-    // Wildcard handler for diagnostics: log all incoming events
-    panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
+	// Register event handlers
+	panel.ipcClient.RegisterEventHandler(state.EventInputUpdated, panel.handleInputUpdated)
+	panel.ipcClient.RegisterEventHandler(state.EventCursorMoved, panel.handleCursorMoved)
+	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.handleSessionChanged)
+	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.handleStateSync)
+	// Wildcard handler for diagnostics: log all incoming events
+	panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
 
 	return panel
 }
@@ -138,11 +138,11 @@ func (p *InputPanel) Init() tea.Cmd {
 		log.Printf("[INPUT] Requesting initial state and preloading sessions")
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
 			log.Printf("[INPUT] Successfully loaded initial state with %d sessions", len(currentState.Sessions))
-			
+
 			// Preload all session information
 			sessionCount := len(currentState.Sessions)
 			log.Printf("[INPUT] Preloaded %d sessions for instant access", sessionCount)
-			
+
 			return StateLoadedMsg{State: currentState}
 		} else {
 			log.Printf("[INPUT] Failed to load initial state: %v", err)
@@ -183,16 +183,16 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("[INPUT] Loading state from IPC server, version %d", msg.State.Version.Version)
 			// Cache the state locally
 			p.cachedState = msg.State
-			
+
 			p.currentSessionID = msg.State.CurrentSessionID
-			
+
 			// Get session title for the current session
 			if sessionInfo, found := msg.State.GetSessionByID(p.currentSessionID); found {
 				p.currentSessionTitle = sessionInfo.Title
 			} else {
 				p.currentSessionTitle = ""
 			}
-			
+
 			p.buffer = msg.State.Input.Buffer
 			p.cursorPosition = msg.State.Input.CursorPosition
 			p.selectionStart = msg.State.Input.SelectionStart
@@ -283,6 +283,12 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.selectionEnd = 0
 		return p, p.syncInputState()
 
+	case tea.ClipboardMsg:
+		// Handle clipboard paste
+		text := string(msg)
+		log.Printf("[INPUT] Clipboard paste received: %q", text)
+		return p.insertCharacter(text)
+
 	default:
 		return p, nil
 	}
@@ -292,45 +298,45 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Prefer the client's server-known version; if unavailable (0), fall back to local panel version;
 // and as a last resort use 1 (initial state version).
 func (p *InputPanel) expectedVersion() int64 {
-    v := p.ipcClient.GetCurrentVersion()
-    if v <= 0 {
-        if p.version > 0 {
-            return p.version
-        }
-        return 1
-    }
-    return v
+	v := p.ipcClient.GetCurrentVersion()
+	if v <= 0 {
+		if p.version > 0 {
+			return p.version
+		}
+		return 1
+	}
+	return v
 }
 
 // sendUpdateWithRetry sends a state update with optimistic concurrency and resolves
 // version conflicts by refreshing the latest state version and retrying once.
 func (p *InputPanel) sendUpdateWithRetry(update types.StateUpdate) (int64, error) {
-    // First attempt with our best-known version
-    update.ExpectedVersion = p.expectedVersion()
-    newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
-    if err == nil {
-        p.version = newVersion
-        return newVersion, nil
-    }
+	// First attempt with our best-known version
+	update.ExpectedVersion = p.expectedVersion()
+	newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
+	if err == nil {
+		p.version = newVersion
+		return newVersion, nil
+	}
 
-    // If we hit a version conflict, refresh the version and retry once
-    if strings.Contains(err.Error(), "version conflict") {
-        // Try to refresh current version via state request
-        if currentState, reqErr := p.ipcClient.RequestState(); reqErr == nil && currentState != nil {
-            p.version = currentState.Version.Version
-        }
+	// If we hit a version conflict, refresh the version and retry once
+	if strings.Contains(err.Error(), "version conflict") {
+		// Try to refresh current version via state request
+		if currentState, reqErr := p.ipcClient.RequestState(); reqErr == nil && currentState != nil {
+			p.version = currentState.Version.Version
+		}
 
-        update.ExpectedVersion = p.expectedVersion()
-        if newVersion2, err2 := p.ipcClient.SendStateUpdateAndWait(update); err2 == nil {
-            p.version = newVersion2
-            return newVersion2, nil
-        } else {
-            return 0, err2
-        }
-    }
+		update.ExpectedVersion = p.expectedVersion()
+		if newVersion2, err2 := p.ipcClient.SendStateUpdateAndWait(update); err2 == nil {
+			p.version = newVersion2
+			return newVersion2, nil
+		} else {
+			return 0, err2
+		}
+	}
 
-    // Non-conflict error, propagate
-    return 0, err
+	// Non-conflict error, propagate
+	return 0, err
 }
 
 // View renders the input panel
@@ -340,6 +346,9 @@ func (p *InputPanel) View() string {
 
 // handleKeyPress processes keyboard input
 func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Log all keyboard input for debugging
+	log.Printf("[INPUT] Key pressed: %q", msg.String())
+
 	switch msg.String() {
 	case "ctrl+c":
 		if p.buffer == "" {
@@ -432,6 +441,11 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		p.buffer = ""
 		p.cursorPosition = 0
 		return p, p.syncInputState()
+
+	case "ctrl+v", "cmd+v":
+		// Handle paste - request clipboard content (both Ctrl+V and Cmd+V for Mac)
+		log.Printf("[INPUT] Paste key detected: %q", msg.String())
+		return p, tea.ReadClipboard
 
 	case "ctrl+t":
 		// Cycle through comfortable themes
@@ -663,7 +677,7 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 
 	// Add to history first
 	p.addToHistory(command)
-	
+
 	// Clear buffer and cursor position immediately for all commands
 	p.buffer = ""
 	p.cursorPosition = 0
@@ -721,14 +735,14 @@ func (p *InputPanel) sendMessage() tea.Cmd {
 		return nil
 	}
 
-    return func() tea.Msg {
-        // Add to history
-        p.addToHistory(message)
+	return func() tea.Msg {
+		// Add to history
+		p.addToHistory(message)
 
-        // Perform API call in background so UI remains responsive
-        go func(sessionID, userMsg string) {
-            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-            defer cancel()
+		// Perform API call in background so UI remains responsive
+		go func(sessionID, userMsg string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
 			response, err := p.client.Session.Prompt(ctx, sessionID, opencode.SessionPromptParams{
 				Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
@@ -744,24 +758,24 @@ func (p *InputPanel) sendMessage() tea.Cmd {
 				return
 			}
 
-            log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
+			log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
 
-            // Create assistant message from response
-            if response != nil {
-                // Check for errors in the response
-                if response.Info.Error.Name != "" {
-                    log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
-                    return
-                }
+			// Create assistant message from response
+			if response != nil {
+				// Check for errors in the response
+				if response.Info.Error.Name != "" {
+					log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
+					return
+				}
 
-                // Do not add assistant message from input panel.
-                // The SSE orchestrator will add and stream-update messages to avoid duplicates.
-            }
-        }(p.currentSessionID, message)
+				// Do not add assistant message from input panel.
+				// The SSE orchestrator will add and stream-update messages to avoid duplicates.
+			}
+		}(p.currentSessionID, message)
 
-        // Immediately clear input buffer in UI
-        return MessageSentMsg{}
-    }
+		// Immediately clear input buffer in UI
+		return MessageSentMsg{}
+	}
 }
 
 // addToHistory adds a message to the history
@@ -784,151 +798,151 @@ func (p *InputPanel) addToHistory(message string) {
 // Event handlers
 
 func (p *InputPanel) handleInputUpdated(event types.StateEvent) error {
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.InputUpdatePayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            // Only update if not from this panel
-            if event.SourcePanel != "input-panel" {
-                p.buffer = payload.Buffer
-                p.cursorPosition = payload.CursorPosition
-                p.selectionStart = payload.SelectionStart
-                p.selectionEnd = payload.SelectionEnd
-                if payload.Mode != "" {
-                    p.mode = payload.Mode
-                }
-            }
-            // Always sync local version to event version to avoid conflicts
-            p.version = event.Version
-        }
-    }
-    return nil
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.InputUpdatePayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			// Only update if not from this panel
+			if event.SourcePanel != "input-panel" {
+				p.buffer = payload.Buffer
+				p.cursorPosition = payload.CursorPosition
+				p.selectionStart = payload.SelectionStart
+				p.selectionEnd = payload.SelectionEnd
+				if payload.Mode != "" {
+					p.mode = payload.Mode
+				}
+			}
+			// Always sync local version to event version to avoid conflicts
+			p.version = event.Version
+		}
+	}
+	return nil
 }
 
 func (p *InputPanel) handleCursorMoved(event types.StateEvent) error {
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.CursorMovePayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            // Only update if not from this panel
-            if event.SourcePanel != "input-panel" {
-                p.cursorPosition = payload.Position
-                p.selectionStart = payload.SelectionStart
-                p.selectionEnd = payload.SelectionEnd
-            }
-            // Always sync local version to event version to avoid conflicts
-            p.version = event.Version
-        }
-    }
-    return nil
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.CursorMovePayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			// Only update if not from this panel
+			if event.SourcePanel != "input-panel" {
+				p.cursorPosition = payload.Position
+				p.selectionStart = payload.SelectionStart
+				p.selectionEnd = payload.SelectionEnd
+			}
+			// Always sync local version to event version to avoid conflicts
+			p.version = event.Version
+		}
+	}
+	return nil
 }
 
 func (p *InputPanel) handleSessionChanged(event types.StateEvent) error {
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.SessionChangePayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            oldSessionID := p.currentSessionID
-            p.currentSessionID = payload.SessionID
-            
-            // Try to find session title from cached sessions first
-            if sessionInfo, found := p.getSessionInfo(p.currentSessionID); found {
-                p.currentSessionTitle = sessionInfo.Title
-                log.Printf("[INPUT] Session changed from %s to %s, title updated to '%s' (from cache), version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
-                // Trigger immediate UI update
-                if p.program != nil {
-                    go func() {
-                        p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: sessionInfo.Title})
-                    }()
-                }
-            } else {
-                // If not found in cache, use a fallback title and update asynchronously
-                p.currentSessionTitle = fmt.Sprintf("Session %s", p.currentSessionID[:8])
-                log.Printf("[INPUT] Session changed from %s to %s, using fallback title '%s', version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
-                
-                // Trigger async state request to update cache and title
-                go func() {
-                    if currentState, err := p.ipcClient.RequestState(); err == nil {
-                        p.cachedState = currentState // Update cache
-                        if sessionInfo, found := currentState.GetSessionByID(p.currentSessionID); found {
-                            // Update title in background and trigger UI update
-                            p.currentSessionTitle = sessionInfo.Title
-                            log.Printf("[INPUT] Async title update: session %s title set to '%s'", p.currentSessionID, p.currentSessionTitle)
-                            if p.program != nil {
-                                p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: sessionInfo.Title})
-                            }
-                        }
-                    } else {
-                        log.Printf("[INPUT] Async state request failed: %v", err)
-                        // Keep the fallback title if async request fails
-                    }
-                }()
-            }
-            
-            // Sync local version to event version to avoid conflicts
-            p.version = event.Version
-        }
-    }
-    return nil
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.SessionChangePayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			oldSessionID := p.currentSessionID
+			p.currentSessionID = payload.SessionID
+
+			// Try to find session title from cached sessions first
+			if sessionInfo, found := p.getSessionInfo(p.currentSessionID); found {
+				p.currentSessionTitle = sessionInfo.Title
+				log.Printf("[INPUT] Session changed from %s to %s, title updated to '%s' (from cache), version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
+				// Trigger immediate UI update
+				if p.program != nil {
+					go func() {
+						p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: sessionInfo.Title})
+					}()
+				}
+			} else {
+				// If not found in cache, use a fallback title and update asynchronously
+				p.currentSessionTitle = fmt.Sprintf("Session %s", p.currentSessionID[:8])
+				log.Printf("[INPUT] Session changed from %s to %s, using fallback title '%s', version=%d", oldSessionID, p.currentSessionID, p.currentSessionTitle, event.Version)
+
+				// Trigger async state request to update cache and title
+				go func() {
+					if currentState, err := p.ipcClient.RequestState(); err == nil {
+						p.cachedState = currentState // Update cache
+						if sessionInfo, found := currentState.GetSessionByID(p.currentSessionID); found {
+							// Update title in background and trigger UI update
+							p.currentSessionTitle = sessionInfo.Title
+							log.Printf("[INPUT] Async title update: session %s title set to '%s'", p.currentSessionID, p.currentSessionTitle)
+							if p.program != nil {
+								p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: sessionInfo.Title})
+							}
+						}
+					} else {
+						log.Printf("[INPUT] Async state request failed: %v", err)
+						// Keep the fallback title if async request fails
+					}
+				}()
+			}
+
+			// Sync local version to event version to avoid conflicts
+			p.version = event.Version
+		}
+	}
+	return nil
 }
 
 func (p *InputPanel) handleStateSync(event types.StateEvent) error {
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.StateSyncPayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            // Update cached state with smart invalidation
-            if p.cachedState == nil || payload.State.Version.Version > p.version {
-                p.cachedState = payload.State
-                p.version = payload.State.Version.Version
-                log.Printf("[INPUT] Cache updated to version %d", p.version)
-                
-                p.currentSessionID = payload.State.CurrentSessionID
-                p.buffer = payload.State.Input.Buffer
-                p.cursorPosition = payload.State.Input.CursorPosition
-                p.selectionStart = payload.State.Input.SelectionStart
-                p.selectionEnd = payload.State.Input.SelectionEnd
-                p.mode = payload.State.Input.Mode
-                p.history = payload.State.Input.History
-                p.historyIndex = payload.State.Input.HistoryIndex
-                
-                // Update session title when we receive state sync
-                if sessionInfo, found := payload.State.GetSessionByID(p.currentSessionID); found {
-                    oldTitle := p.currentSessionTitle
-                    p.currentSessionTitle = sessionInfo.Title
-                    log.Printf("[INPUT] Session title updated from '%s' to '%s' via state sync", oldTitle, p.currentSessionTitle)
-                    
-                    // Trigger UI update if title changed
-                    if oldTitle != p.currentSessionTitle && p.program != nil {
-                        go func() {
-                            p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: p.currentSessionTitle})
-                        }()
-                    }
-                } else {
-                    // Session not found, clear title
-                    if p.currentSessionTitle != "" {
-                        p.currentSessionTitle = ""
-                        log.Printf("[INPUT] Session %s not found in state sync, title cleared", p.currentSessionID)
-                        
-                        if p.program != nil {
-                            go func() {
-                                p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: ""})
-                            }()
-                        }
-                    }
-                }
-                
-                log.Printf("[INPUT] State synchronized, version=%d", p.version)
-            } else {
-                log.Printf("[INPUT] Ignoring state sync with older/same version %d (current: %d)", payload.State.Version.Version, p.version)
-            }
-        }
-    }
-    return nil
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.StateSyncPayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			// Update cached state with smart invalidation
+			if p.cachedState == nil || payload.State.Version.Version > p.version {
+				p.cachedState = payload.State
+				p.version = payload.State.Version.Version
+				log.Printf("[INPUT] Cache updated to version %d", p.version)
+
+				p.currentSessionID = payload.State.CurrentSessionID
+				p.buffer = payload.State.Input.Buffer
+				p.cursorPosition = payload.State.Input.CursorPosition
+				p.selectionStart = payload.State.Input.SelectionStart
+				p.selectionEnd = payload.State.Input.SelectionEnd
+				p.mode = payload.State.Input.Mode
+				p.history = payload.State.Input.History
+				p.historyIndex = payload.State.Input.HistoryIndex
+
+				// Update session title when we receive state sync
+				if sessionInfo, found := payload.State.GetSessionByID(p.currentSessionID); found {
+					oldTitle := p.currentSessionTitle
+					p.currentSessionTitle = sessionInfo.Title
+					log.Printf("[INPUT] Session title updated from '%s' to '%s' via state sync", oldTitle, p.currentSessionTitle)
+
+					// Trigger UI update if title changed
+					if oldTitle != p.currentSessionTitle && p.program != nil {
+						go func() {
+							p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: p.currentSessionTitle})
+						}()
+					}
+				} else {
+					// Session not found, clear title
+					if p.currentSessionTitle != "" {
+						p.currentSessionTitle = ""
+						log.Printf("[INPUT] Session %s not found in state sync, title cleared", p.currentSessionID)
+
+						if p.program != nil {
+							go func() {
+								p.program.Send(TitleUpdatedMsg{SessionID: p.currentSessionID, Title: ""})
+							}()
+						}
+					}
+				}
+
+				log.Printf("[INPUT] State synchronized, version=%d", p.version)
+			} else {
+				log.Printf("[INPUT] Ignoring state sync with older/same version %d (current: %d)", payload.State.Version.Version, p.version)
+			}
+		}
+	}
+	return nil
 }
 
 // handleAnyEvent logs any received event for diagnostics
 func (p *InputPanel) handleAnyEvent(event types.StateEvent) error {
-    log.Printf("[INPUT] v%v Received event type: %s from %s", event.Version, event.Type, event.SourcePanel)
-    // Keep local version in sync with server event version
-    p.version = event.Version
-    return nil
+	log.Printf("[INPUT] v%v Received event type: %s from %s", event.Version, event.Type, event.SourcePanel)
+	// Keep local version in sync with server event version
+	p.version = event.Version
+	return nil
 }
 
 func (p *InputPanel) handleInputEvent(event types.StateEvent) (tea.Model, tea.Cmd) {
@@ -948,54 +962,55 @@ func (p *InputPanel) handleInputEvent(event types.StateEvent) (tea.Model, tea.Cm
 	}
 	return p, nil
 }
+
 // Sync methods
 
 func (p *InputPanel) syncInputState() tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type: types.InputUpdated,
-            Payload: types.InputUpdatePayload{
-                Buffer:         p.buffer,
-                CursorPosition: p.cursorPosition,
-                SelectionStart: p.selectionStart,
-                SelectionEnd:   p.selectionEnd,
-                Mode:           p.mode,
-            },
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	return func() tea.Msg {
+		update := types.StateUpdate{
+			Type: types.InputUpdated,
+			Payload: types.InputUpdatePayload{
+				Buffer:         p.buffer,
+				CursorPosition: p.cursorPosition,
+				SelectionStart: p.selectionStart,
+				SelectionEnd:   p.selectionEnd,
+				Mode:           p.mode,
+			},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        return nil
-    }
+		return nil
+	}
 }
 
 func (p *InputPanel) syncCursorPosition() tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type: types.CursorMoved,
-            Payload: types.CursorMovePayload{
-                Position:       p.cursorPosition,
-                SelectionStart: p.selectionStart,
-                SelectionEnd:   p.selectionEnd,
-            },
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	return func() tea.Msg {
+		update := types.StateUpdate{
+			Type: types.CursorMoved,
+			Payload: types.CursorMovePayload{
+				Position:       p.cursorPosition,
+				SelectionStart: p.selectionStart,
+				SelectionEnd:   p.selectionEnd,
+			},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        return nil
-    }
+		return nil
+	}
 }
 
 // Command implementations
@@ -1014,7 +1029,7 @@ func (p *InputPanel) clearMessages() tea.Cmd {
 }
 
 func (p *InputPanel) createNewSession() tea.Cmd {
-    return func() tea.Msg {
+	return func() tea.Msg {
 		// Generate a default title with timestamp
 		title := fmt.Sprintf("New Session %s", time.Now().Format("15:04:05"))
 
@@ -1023,7 +1038,7 @@ func (p *InputPanel) createNewSession() tea.Cmd {
 		defer cancel()
 
 		session, err := p.client.Session.New(ctx, opencode.SessionNewParams{
-			Title:     opencode.F(title),
+			Title: opencode.F(title),
 		})
 
 		if err != nil {
@@ -1034,79 +1049,78 @@ func (p *InputPanel) createNewSession() tea.Cmd {
 		log.Printf("[INPUT] Successfully created session on OpenCode server: %s", session.ID)
 
 		// Now create local state update with the server-assigned session ID
-        update := types.StateUpdate{
-            Type: types.SessionAdded,
-            Payload: types.SessionAddPayload{
-                Session: types.SessionInfo{
-                    ID:           session.ID, // Use server-assigned ID
-                    Title:        session.Title,
-                    CreatedAt:    time.Now(),
-                    UpdatedAt:    time.Now(),
-                    MessageCount: 0,
-                    IsActive:     true,
-                },
-            },
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
+		update := types.StateUpdate{
+			Type: types.SessionAdded,
+			Payload: types.SessionAddPayload{
+				Session: types.SessionInfo{
+					ID:           session.ID, // Use server-assigned ID
+					Title:        session.Title,
+					CreatedAt:    time.Now(),
+					UpdatedAt:    time.Now(),
+					MessageCount: 0,
+					IsActive:     true,
+				},
+			},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
 
-        // Send the update via IPC
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            log.Printf("[INPUT] Failed to send session state update: %v", err)
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+		// Send the update via IPC
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			log.Printf("[INPUT] Failed to send session state update: %v", err)
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        // Broadcast session change so other panels switch, and update locally
-        change := types.StateUpdate{
-            Type:        types.SessionChanged,
-            Payload:     types.SessionChangePayload{SessionID: session.ID},
-            SourcePanel: "input-panel",
-            Timestamp:   time.Now(),
-        }
-        if newVersion, err := p.sendUpdateWithRetry(change); err != nil {
-            log.Printf("[INPUT] Failed to broadcast session change: %v", err)
-        } else {
-            p.version = newVersion
-        }
-        p.currentSessionID = session.ID
+		// Broadcast session change so other panels switch, and update locally
+		change := types.StateUpdate{
+			Type:        types.SessionChanged,
+			Payload:     types.SessionChangePayload{SessionID: session.ID},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+		}
+		if newVersion, err := p.sendUpdateWithRetry(change); err != nil {
+			log.Printf("[INPUT] Failed to broadcast session change: %v", err)
+		} else {
+			p.version = newVersion
+		}
+		p.currentSessionID = session.ID
 
-        return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
-    }
+		return InfoMsg{Message: fmt.Sprintf("Created new session: %s (ID: %s)", session.Title, session.ID)}
+	}
 }
 
 func (p *InputPanel) switchToSession(sessionID string) tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type:            types.SessionChanged,
-            Payload:         types.SessionChangePayload{SessionID: sessionID},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	return func() tea.Msg {
+		update := types.StateUpdate{
+			Type:        types.SessionChanged,
+			Payload:     types.SessionChangePayload{SessionID: sessionID},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        // Update local header immediately
-        p.currentSessionID = sessionID
+		// Update local header immediately
+		p.currentSessionID = sessionID
 
-        return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
-    }
+		return InfoMsg{Message: fmt.Sprintf("Switched to session %s", sessionID)}
+	}
 }
 
 func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
-    return func() tea.Msg {
+	return func() tea.Msg {
 		// Delete session on OpenCode server first
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		result, err := p.client.Session.Delete(ctx, sessionID, opencode.SessionDeleteParams{
-		})
+		result, err := p.client.Session.Delete(ctx, sessionID, opencode.SessionDeleteParams{})
 
 		if err != nil {
 			log.Printf("[INPUT] Failed to delete session on OpenCode server: %v", err)
@@ -1121,83 +1135,83 @@ func (p *InputPanel) deleteSession(sessionID string) tea.Cmd {
 		log.Printf("[INPUT] Successfully deleted session on OpenCode server: %s", sessionID)
 
 		// Now update local state
-        update := types.StateUpdate{
-            Type:            types.SessionDeleted,
-            Payload:         types.SessionDeletePayload{SessionID: sessionID},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            log.Printf("[INPUT] Failed to send session delete state update: %v", err)
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+		update := types.StateUpdate{
+			Type:        types.SessionDeleted,
+			Payload:     types.SessionDeletePayload{SessionID: sessionID},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			log.Printf("[INPUT] Failed to send session delete state update: %v", err)
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        if p.currentSessionID == sessionID {
-            p.currentSessionID = ""
-        }
+		if p.currentSessionID == sessionID {
+			p.currentSessionID = ""
+		}
 
-        return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
-    }
+		return InfoMsg{Message: fmt.Sprintf("Deleted session %s", sessionID)}
+	}
 }
 
 func (p *InputPanel) changeTheme(theme string) tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type:            types.ThemeChanged,
-            Payload:         types.ThemeChangePayload{Theme: theme},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	return func() tea.Msg {
+		update := types.StateUpdate{
+			Type:        types.ThemeChanged,
+			Payload:     types.ThemeChangePayload{Theme: theme},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        return InfoMsg{Message: fmt.Sprintf("Theme changed to %s", theme)}
-    }
+		return InfoMsg{Message: fmt.Sprintf("Theme changed to %s", theme)}
+	}
 }
 
 func (p *InputPanel) changeModel(provider, model string) tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type:            types.ModelChanged,
-            Payload:         types.ModelChangePayload{Provider: provider, Model: model},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	return func() tea.Msg {
+		update := types.StateUpdate{
+			Type:        types.ModelChanged,
+			Payload:     types.ModelChangePayload{Provider: provider, Model: model},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        return InfoMsg{Message: fmt.Sprintf("Model changed to %s/%s", provider, model)}
-    }
+		return InfoMsg{Message: fmt.Sprintf("Model changed to %s/%s", provider, model)}
+	}
 }
 
 func (p *InputPanel) changeAgent(agent string) tea.Cmd {
-    return func() tea.Msg {
-        update := types.StateUpdate{
-            Type:            types.AgentChanged,
-            Payload:         types.AgentChangePayload{Agent: agent},
-            SourcePanel:     "input-panel",
-            Timestamp:       time.Now(),
-            // ExpectedVersion will be set by sendUpdateWithRetry
-        }
-        if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
-            return ErrorMsg{Error: err}
-        } else {
-            p.version = newVersion
-        }
+	return func() tea.Msg {
+		update := types.StateUpdate{
+			Type:        types.AgentChanged,
+			Payload:     types.AgentChangePayload{Agent: agent},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+			// ExpectedVersion will be set by sendUpdateWithRetry
+		}
+		if newVersion, err := p.sendUpdateWithRetry(update); err != nil {
+			return ErrorMsg{Error: err}
+		} else {
+			p.version = newVersion
+		}
 
-        return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
-    }
+		return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
+	}
 }
 
 // cycleTheme cycles through comfortable themes
@@ -1205,7 +1219,7 @@ func (p *InputPanel) cycleTheme() (tea.Model, tea.Cmd) {
 	// Move to next theme in the list
 	p.currentThemeIndex = (p.currentThemeIndex + 1) % len(p.comfortableThemes)
 	nextTheme := p.comfortableThemes[p.currentThemeIndex]
-	
+
 	// Apply the theme locally first
 	if err := theme.SetTheme(nextTheme); err != nil {
 		log.Printf("[INPUT] Failed to set theme locally: %v", err)
@@ -1213,7 +1227,7 @@ func (p *InputPanel) cycleTheme() (tea.Model, tea.Cmd) {
 			return ErrorMsg{Error: fmt.Errorf("Failed to switch theme: %v", err)}
 		}
 	}
-	
+
 	// Send theme change to other panels
 	return p, p.changeTheme(nextTheme)
 }
@@ -1294,7 +1308,7 @@ func (p *InputPanel) renderInput() string {
 	t := theme.CurrentTheme()
 
 	var content string
-	
+
 	// Calculate available height (reserve some space for margins)
 	availableHeight := p.height - 2
 	if availableHeight < 10 {
@@ -1313,7 +1327,7 @@ func (p *InputPanel) renderInput() string {
 	if p.isMultiline {
 		header += " [MULTILINE]"
 	}
-	
+
 	// Debug log to track header rendering
 	log.Printf("[INPUT] Rendering header: %s (currentSessionID: %s, currentSessionTitle: %s)", header, p.currentSessionID, p.currentSessionTitle)
 
@@ -1321,7 +1335,7 @@ func (p *InputPanel) renderInput() string {
 		Foreground(t.Primary()).
 		Bold(true).
 		Render(header) + "\n\n"
-	
+
 	content += headerContent
 	usedLines := 3 // Header + spacing
 
@@ -1338,7 +1352,7 @@ func (p *InputPanel) renderInput() string {
 	if maxInputHeight < 3 {
 		maxInputHeight = 3
 	}
-	
+
 	// Limit input height if needed
 	if inputLines > maxInputHeight {
 		inputStyle = inputStyle.Height(maxInputHeight)
@@ -1366,7 +1380,7 @@ func (p *InputPanel) renderInput() string {
 	modeContent := styles.NewStyle().
 		Foreground(t.TextMuted()).
 		Render(modeText) + "\n"
-	
+
 	content += modeContent
 	usedLines += 1
 
@@ -1375,7 +1389,7 @@ func (p *InputPanel) renderInput() string {
 	helpContent := styles.NewStyle().
 		Foreground(t.TextMuted()).
 		Render(helpText)
-	
+
 	content += helpContent
 	usedLines += 1
 
@@ -1383,7 +1397,7 @@ func (p *InputPanel) renderInput() string {
 	if p.showHelp {
 		remainingLines := availableHeight - usedLines
 		if remainingLines > 5 {
-			content += "\n\n" + p.renderHelpCompact(remainingLines - 2)
+			content += "\n\n" + p.renderHelpCompact(remainingLines-2)
 		} else {
 			// Not enough space for help, show a hint
 			content += "\n" + styles.NewStyle().
@@ -1430,13 +1444,13 @@ func (p *InputPanel) renderHelpCompact(maxLines int) string {
 	}
 
 	// If we have enough space, show full help
-	if maxLines >= len(fullHelpLines) + 2 {
+	if maxLines >= len(fullHelpLines)+2 {
 		return p.renderHelp()
 	}
 
 	// Otherwise, show a truncated version
 	var helpLines []string
-	
+
 	// Always show commands section if we have space
 	if maxLines >= 10 {
 		helpLines = append(helpLines, fullHelpLines[0:8]...)
@@ -1476,7 +1490,7 @@ func (p *InputPanel) renderHelpCompact(maxLines int) string {
 // renderScrollableHelp renders help content with scrolling support
 func (p *InputPanel) renderScrollableHelp(maxLines int) string {
 	t := theme.CurrentTheme()
-	
+
 	if len(p.helpLines) == 0 {
 		return ""
 	}
@@ -1490,35 +1504,35 @@ func (p *InputPanel) renderScrollableHelp(maxLines int) string {
 	// Calculate the visible range
 	startLine := p.helpScrollOffset
 	endLine := min(startLine+availableLines, len(p.helpLines))
-	
+
 	// Ensure we don't go beyond bounds
 	if startLine >= len(p.helpLines) {
 		startLine = max(0, len(p.helpLines)-availableLines)
 		p.helpScrollOffset = startLine
 	}
-	
+
 	if endLine <= startLine {
 		endLine = startLine + 1
 	}
 
 	// Get the visible lines
 	visibleLines := p.helpLines[startLine:endLine]
-	
+
 	// Add scroll indicators
 	var scrollInfo []string
 	if startLine > 0 {
 		scrollInfo = append(scrollInfo, "▲ More content above")
 	}
-	
+
 	scrollInfo = append(scrollInfo, visibleLines...)
-	
+
 	if endLine < len(p.helpLines) {
 		scrollInfo = append(scrollInfo, "▼ More content below")
 	}
-	
+
 	// Add navigation hint at the bottom
 	scrollInfo = append(scrollInfo, "")
-	scrollInfo = append(scrollInfo, fmt.Sprintf("Scroll: ↑/↓ lines, PgUp/PgDn pages, Esc to exit (%d/%d)", 
+	scrollInfo = append(scrollInfo, fmt.Sprintf("Scroll: ↑/↓ lines, PgUp/PgDn pages, Esc to exit (%d/%d)",
 		startLine+1, len(p.helpLines)))
 
 	helpContent := strings.Join(scrollInfo, "\n")
@@ -1587,16 +1601,16 @@ type InputEventMsg struct {
 }
 
 type MessageSentMsg struct {
-    Message types.MessageInfo
+	Message types.MessageInfo
 }
 
 type TitleUpdatedMsg struct {
-    SessionID string
-    Title     string
+	SessionID string
+	Title     string
 }
 
 type PreloadCompletedMsg struct {
-    SessionCount int
+	SessionCount int
 }
 
 type SessionSyncMsg struct {
@@ -1623,7 +1637,7 @@ func (p *InputPanel) getSessionInfo(sessionID string) (types.SessionInfo, bool) 
 	if p.cachedState != nil {
 		return p.cachedState.GetSessionByID(sessionID)
 	}
-	
+
 	// Fallback to requesting state only if no cache is available
 	if currentState, err := p.ipcClient.RequestState(); err == nil {
 		p.cachedState = currentState // Cache the result
@@ -1636,14 +1650,14 @@ func (p *InputPanel) getSessionInfo(sessionID string) (types.SessionInfo, bool) 
 
 // decodePayload converts an event payload map back into the target struct type.
 func decodePayload(data interface{}, target interface{}) error {
-    bytes, err := json.Marshal(data)
-    if err != nil {
-        return fmt.Errorf("failed to marshal payload map: %w", err)
-    }
-    if err := json.Unmarshal(bytes, target); err != nil {
-        return fmt.Errorf("failed to unmarshal payload into target struct: %w", err)
-    }
-    return nil
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload map: %w", err)
+	}
+	if err := json.Unmarshal(bytes, target); err != nil {
+		return fmt.Errorf("failed to unmarshal payload into target struct: %w", err)
+	}
+	return nil
 }
 
 func main() {
