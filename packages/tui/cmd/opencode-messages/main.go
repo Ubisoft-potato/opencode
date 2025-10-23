@@ -21,23 +21,23 @@ import (
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/ipc"
 	"github.com/sst/opencode/internal/state"
-	"github.com/sst/opencode/internal/types"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
+	"github.com/sst/opencode/internal/types"
 	"github.com/sst/opencode/internal/util"
 )
 
 // RenderedLine represents a single rendered line with metadata
 type RenderedLine struct {
-	Content         string    `json:"content"`
-	MessageID       string    `json:"message_id"`
-	MessageType     string    `json:"message_type"`
-	LineIndex       int       `json:"line_index"`
-	IsFirstLine     bool      `json:"is_first_line"`
-	IsLastLine      bool      `json:"is_last_line"`
-	IsSeparator     bool      `json:"is_separator"`     // Line used for spacing between messages
-	NeedsBackground bool      `json:"needs_background"` // Line needs background color (for user messages)
-	BackgroundWidth int       `json:"background_width"` // Calculated width for background rendering
+	Content         string `json:"content"`
+	MessageID       string `json:"message_id"`
+	MessageType     string `json:"message_type"`
+	LineIndex       int    `json:"line_index"`
+	IsFirstLine     bool   `json:"is_first_line"`
+	IsLastLine      bool   `json:"is_last_line"`
+	IsSeparator     bool   `json:"is_separator"`     // Line used for spacing between messages
+	NeedsBackground bool   `json:"needs_background"` // Line needs background color (for user messages)
+	BackgroundWidth int    `json:"background_width"` // Calculated width for background rendering
 }
 
 // MessageRenderCache caches rendered message content
@@ -119,23 +119,23 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
 		},
 	}
 
-    // Register event handlers (bridge IPC events into Bubble Tea loop)
-    panel.ipcClient.RegisterEventHandler(state.EventMessageAdded, panel.forwardEventToUI)
-    panel.ipcClient.RegisterEventHandler(state.EventMessageUpdated, panel.forwardEventToUI)
-    panel.ipcClient.RegisterEventHandler(state.EventMessageDeleted, panel.forwardEventToUI)
-    panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.forwardEventToUI)
-    panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.forwardEventToUI)
-    panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardEventToUI)
+	// Register event handlers (bridge IPC events into Bubble Tea loop)
+	panel.ipcClient.RegisterEventHandler(state.EventMessageAdded, panel.forwardEventToUI)
+	panel.ipcClient.RegisterEventHandler(state.EventMessageUpdated, panel.forwardEventToUI)
+	panel.ipcClient.RegisterEventHandler(state.EventMessageDeleted, panel.forwardEventToUI)
+	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.forwardEventToUI)
+	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.forwardEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardEventToUI)
 
-    // Wildcard handler to log receipt of any event type for diagnostics
-    panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
+	// Wildcard handler to log receipt of any event type for diagnostics
+	panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
 
 	return panel
 }
 
 // Init initializes the panel
 func (p *MessagesPanel) Init() tea.Cmd {
-    var cmds []tea.Cmd
+	var cmds []tea.Cmd
 
 	// Connect to IPC server
 	cmds = append(cmds, func() tea.Msg {
@@ -150,14 +150,14 @@ func (p *MessagesPanel) Init() tea.Cmd {
 		time.Sleep(100 * time.Millisecond) // Wait for connection
 		if currentState, err := p.ipcClient.RequestState(); err == nil {
 			return StateLoadedMsg{State: currentState}
-		}else{
-     		  log.Printf("Sessions panel initial state err:%v",err)
-    }
+		} else {
+			log.Printf("Sessions panel initial state err:%v", err)
+		}
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
-    // Subscribe to IPC events bridged via eventsChan
-    cmds = append(cmds, p.subscribeEvents())
+	// Subscribe to IPC events bridged via eventsChan
+	cmds = append(cmds, p.subscribeEvents())
 
 	return tea.Batch(cmds...)
 }
@@ -189,10 +189,10 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("Messages panel error: %v", msg.Error)
 		return p, nil
 
-    case MessageEventMsg:
-        // Handle event and continue listening for more
-        _, cmd := p.handleMessageEvent(msg.Event)
-        return p, tea.Batch(cmd, p.subscribeEvents())
+	case MessageEventMsg:
+		// Handle event and continue listening for more
+		_, cmd := p.handleMessageEvent(msg.Event)
+		return p, tea.Batch(cmd, p.subscribeEvents())
 
 	case StreamingUpdateMsg:
 		return p.handleStreamingUpdate(msg)
@@ -432,239 +432,239 @@ func (p *MessagesPanel) startEventStream() tea.Cmd {
 // Event handlers
 
 func (p *MessagesPanel) handleMessageAdded(event state.StateEvent) error {
-    p.version = event.Version
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.MessageAddPayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            if payload.Message.SessionID == p.currentSessionID {
-                p.messages = append(p.messages, payload.Message)
+	p.version = event.Version
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.MessageAddPayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			if payload.Message.SessionID == p.currentSessionID {
+				p.messages = append(p.messages, payload.Message)
 
-                // Rebuild rendered lines with the new message
-                mode := "plain"
-                if p.markdownMode {
-                    mode = "markdown"
-                }
-                p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+				// Rebuild rendered lines with the new message
+				mode := "plain"
+				if p.markdownMode {
+					mode = "markdown"
+				}
+				p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
 
-                // Auto-scroll to bottom if enabled
-                if p.autoScroll {
-                    p.scrollToBottom()
-                    log.Printf("[MESSAGES] Auto-scrolled to bottom for new message")
-                }
+				// Auto-scroll to bottom if enabled
+				if p.autoScroll {
+					p.scrollToBottom()
+					log.Printf("[MESSAGES] Auto-scrolled to bottom for new message")
+				}
 
-                // Clean up cache periodically
-                p.lineRenderer.cleanupCache()
-            }
-            log.Printf("[MESSAGES] v%v Message added: %s (session=%s)", event.Version, payload.Message.ID, payload.Message.SessionID)
-        }
-    }
-    return nil
+				// Clean up cache periodically
+				p.lineRenderer.cleanupCache()
+			}
+			log.Printf("[MESSAGES] v%v Message added: %s (session=%s)", event.Version, payload.Message.ID, payload.Message.SessionID)
+		}
+	}
+	return nil
 }
 
 func (p *MessagesPanel) handleMessageUpdated(event state.StateEvent) error {
-    p.version = event.Version
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.MessageUpdatePayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            messageUpdated := false
-            for i, message := range p.messages {
-                if message.ID == payload.MessageID {
-                    if payload.Content != "" {
-                        p.messages[i].Content = payload.Content
-                        messageUpdated = true
-                    }
-                    if payload.Status != "" {
-                        p.messages[i].Status = payload.Status
-                        messageUpdated = true
-                    }
-                    p.messages[i].Timestamp = time.Now()
-                    break
-                }
-            }
+	p.version = event.Version
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.MessageUpdatePayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			messageUpdated := false
+			for i, message := range p.messages {
+				if message.ID == payload.MessageID {
+					if payload.Content != "" {
+						p.messages[i].Content = payload.Content
+						messageUpdated = true
+					}
+					if payload.Status != "" {
+						p.messages[i].Status = payload.Status
+						messageUpdated = true
+					}
+					p.messages[i].Timestamp = time.Now()
+					break
+				}
+			}
 
-            // Rebuild rendered lines if message content changed
-            if messageUpdated {
-                mode := "plain"
-                if p.markdownMode {
-                    mode = "markdown"
-                }
-                p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+			// Rebuild rendered lines if message content changed
+			if messageUpdated {
+				mode := "plain"
+				if p.markdownMode {
+					mode = "markdown"
+				}
+				p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
 
-                // Auto-scroll to bottom if enabled and this is a streaming update
-                if p.autoScroll && payload.Status == "pending" {
-                    p.scrollToBottom()
-                    log.Printf("[MESSAGES] Auto-scrolled for streaming update")
-                }
-            }
+				// Auto-scroll to bottom if enabled and this is a streaming update
+				if p.autoScroll && payload.Status == "pending" {
+					p.scrollToBottom()
+					log.Printf("[MESSAGES] Auto-scrolled for streaming update")
+				}
+			}
 
-            log.Printf("[MESSAGES] v%v Message updated: %s (content changed: %t)", event.Version, payload.MessageID, messageUpdated)
-        }
-    }
-    return nil
+			log.Printf("[MESSAGES] v%v Message updated: %s (content changed: %t)", event.Version, payload.MessageID, messageUpdated)
+		}
+	}
+	return nil
 }
 
 func (p *MessagesPanel) handleMessageDeleted(event state.StateEvent) error {
-    p.version = event.Version
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.MessageDeletePayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            for i, message := range p.messages {
-                if message.ID == payload.MessageID {
-                    p.messages = append(p.messages[:i], p.messages[i+1:]...)
-                    break
-                }
-            }
-            log.Printf("[MESSAGES] v%v Message deleted: %s", event.Version, payload.MessageID)
-        }
-    }
-    return nil
+	p.version = event.Version
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.MessageDeletePayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			for i, message := range p.messages {
+				if message.ID == payload.MessageID {
+					p.messages = append(p.messages[:i], p.messages[i+1:]...)
+					break
+				}
+			}
+			log.Printf("[MESSAGES] v%v Message deleted: %s", event.Version, payload.MessageID)
+		}
+	}
+	return nil
 }
 
 func (p *MessagesPanel) handleSessionChanged(event state.StateEvent) error {
-    p.version = event.Version
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.SessionChangePayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            log.Printf("[MESSAGES] v%v Session changed from %s to: %s", event.Version, p.currentSessionID, payload.SessionID)
+	p.version = event.Version
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.SessionChangePayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			log.Printf("[MESSAGES] v%v Session changed from %s to: %s", event.Version, p.currentSessionID, payload.SessionID)
 
-            // Save current session state before switching
-            if p.currentSessionID != "" && len(p.messages) > 0 {
-                lastMessageID := ""
-                if len(p.messages) > 0 {
-                    lastMessageID = p.messages[len(p.messages)-1].ID
-                }
-                p.lineRenderer.saveSessionState(p.currentSessionID, p.scrollOffset, p.autoScroll, lastMessageID)
-                log.Printf("[MESSAGES] Saved state for session %s", p.currentSessionID)
-            }
+			// Save current session state before switching
+			if p.currentSessionID != "" && len(p.messages) > 0 {
+				lastMessageID := ""
+				if len(p.messages) > 0 {
+					lastMessageID = p.messages[len(p.messages)-1].ID
+				}
+				p.lineRenderer.saveSessionState(p.currentSessionID, p.scrollOffset, p.autoScroll, lastMessageID)
+				log.Printf("[MESSAGES] Saved state for session %s", p.currentSessionID)
+			}
 
-            // Switch to new session
-            oldSessionID := p.currentSessionID
-            p.currentSessionID = payload.SessionID
+			// Switch to new session
+			oldSessionID := p.currentSessionID
+			p.currentSessionID = payload.SessionID
 
-            // Try to restore state for the new session
-            sessionState := p.lineRenderer.getSessionState(p.currentSessionID)
-            if sessionState != nil && oldSessionID != p.currentSessionID {
-                log.Printf("[MESSAGES] Restoring state for session %s: offset=%d, autoScroll=%t",
-                    p.currentSessionID, sessionState.ScrollOffset, sessionState.AutoScroll)
-            }
+			// Try to restore state for the new session
+			sessionState := p.lineRenderer.getSessionState(p.currentSessionID)
+			if sessionState != nil && oldSessionID != p.currentSessionID {
+				log.Printf("[MESSAGES] Restoring state for session %s: offset=%d, autoScroll=%t",
+					p.currentSessionID, sessionState.ScrollOffset, sessionState.AutoScroll)
+			}
 
-            // Fetch messages for the new session
-            messages, err := p.client.Session.Messages(p.ctx, p.currentSessionID, opencode.SessionMessagesParams{})
-            if err != nil {
-                log.Printf("[MESSAGES] Error fetching messages for session %s: %v", p.currentSessionID, err)
-                p.messages = make([]types.MessageInfo, 0) // Clear messages on error
-                // Reset to default state
-                p.scrollOffset = 0
-                p.autoScroll = true
-                return nil
-            }
+			// Fetch messages for the new session
+			messages, err := p.client.Session.Messages(p.ctx, p.currentSessionID, opencode.SessionMessagesParams{})
+			if err != nil {
+				log.Printf("[MESSAGES] Error fetching messages for session %s: %v", p.currentSessionID, err)
+				p.messages = make([]types.MessageInfo, 0) // Clear messages on error
+				// Reset to default state
+				p.scrollOffset = 0
+				p.autoScroll = true
+				return nil
+			}
 
-            // Convert to state format
-            messageInfos := make([]types.MessageInfo, 0)
-            if messages != nil {
-                for _, message := range *messages {
-                    var messageType string
-                    var content string
+			// Convert to state format
+			messageInfos := make([]types.MessageInfo, 0)
+			if messages != nil {
+				for _, message := range *messages {
+					var messageType string
+					var content string
 
-                    switch msg := message.Info.AsUnion().(type) {
-                    case opencode.UserMessage:
-                        messageType = "user"
-                        var contentParts []string
-                        for _, part := range message.Parts {
-                            if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
-                                contentParts = append(contentParts, textPart.Text)
-                            }
-                        }
-                        content = strings.Join(contentParts, "\n")
-                    case opencode.AssistantMessage:
-                        messageType = "assistant"
-                        if len(message.Parts) > 0 {
-                            var contentParts []string
-                            for _, part := range message.Parts {
-                                if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
-                                    contentParts = append(contentParts, textPart.Text)
-                                }
-                            }
-                            content = strings.Join(contentParts, "\n")
-                        }
-                    default:
-                        messageType = "system"
-                        content = fmt.Sprintf("Unknown message type: %T", msg)
-                    }
+					switch msg := message.Info.AsUnion().(type) {
+					case opencode.UserMessage:
+						messageType = "user"
+						var contentParts []string
+						for _, part := range message.Parts {
+							if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+								contentParts = append(contentParts, textPart.Text)
+							}
+						}
+						content = strings.Join(contentParts, "\n")
+					case opencode.AssistantMessage:
+						messageType = "assistant"
+						if len(message.Parts) > 0 {
+							var contentParts []string
+							for _, part := range message.Parts {
+								if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+									contentParts = append(contentParts, textPart.Text)
+								}
+							}
+							content = strings.Join(contentParts, "\n")
+						}
+					default:
+						messageType = "system"
+						content = fmt.Sprintf("Unknown message type: %T", msg)
+					}
 
-                    messageInfo := types.MessageInfo{
-                        ID:        message.Info.ID,
-                        SessionID: p.currentSessionID,
-                        Type:      messageType,
-                        Content:   content,
-                        Timestamp: time.Now(), // Use time.Now() for safety, like in refreshMessages
-                        Status:    "completed",
-                    }
-                    messageInfos = append(messageInfos, messageInfo)
-                }
-            }
+					messageInfo := types.MessageInfo{
+						ID:        message.Info.ID,
+						SessionID: p.currentSessionID,
+						Type:      messageType,
+						Content:   content,
+						Timestamp: time.Now(), // Use time.Now() for safety, like in refreshMessages
+						Status:    "completed",
+					}
+					messageInfos = append(messageInfos, messageInfo)
+				}
+			}
 
-            log.Printf("[MESSAGES] v%v Fetched %d messages for session %s", event.Version, len(messageInfos), p.currentSessionID)
-            p.messages = messageInfos
+			log.Printf("[MESSAGES] v%v Fetched %d messages for session %s", event.Version, len(messageInfos), p.currentSessionID)
+			p.messages = messageInfos
 
-            // Rebuild rendered lines for the new messages
-            mode := "plain"
-            if p.markdownMode {
-                mode = "markdown"
-            }
-            p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+			// Rebuild rendered lines for the new messages
+			mode := "plain"
+			if p.markdownMode {
+				mode = "markdown"
+			}
+			p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
 
-            // Restore session state or use defaults
-            sessionState = p.lineRenderer.getSessionState(p.currentSessionID)
-            if sessionState != nil && len(p.messages) > 0 {
-                // Check if there are new messages since last view
-                hasNewMessages := false
-                if sessionState.LastViewedMessageID != "" && len(p.messages) > 0 {
-                    lastMessage := p.messages[len(p.messages)-1]
-                    if lastMessage.ID != sessionState.LastViewedMessageID {
-                        hasNewMessages = true
-                        log.Printf("[MESSAGES] New messages detected since last view")
-                    }
-                }
+			// Restore session state or use defaults
+			sessionState = p.lineRenderer.getSessionState(p.currentSessionID)
+			if sessionState != nil && len(p.messages) > 0 {
+				// Check if there are new messages since last view
+				hasNewMessages := false
+				if sessionState.LastViewedMessageID != "" && len(p.messages) > 0 {
+					lastMessage := p.messages[len(p.messages)-1]
+					if lastMessage.ID != sessionState.LastViewedMessageID {
+						hasNewMessages = true
+						log.Printf("[MESSAGES] New messages detected since last view")
+					}
+				}
 
-                // Restore scroll position and auto-scroll state
-                p.autoScroll = sessionState.AutoScroll
+				// Restore scroll position and auto-scroll state
+				p.autoScroll = sessionState.AutoScroll
 
-                // If user was at bottom and there are new messages, stay at bottom
-                if sessionState.AutoScroll && hasNewMessages {
-                    p.scrollToBottom()
-                    log.Printf("[MESSAGES] Auto-scrolled to bottom due to new messages")
-                } else {
-                    // Restore previous scroll position, but validate it
-                    maxScroll := p.calculateMaxScroll()
-                    p.scrollOffset = min(sessionState.ScrollOffset, maxScroll)
-                    log.Printf("[MESSAGES] Restored scroll offset to %d (max=%d)", p.scrollOffset, maxScroll)
-                }
-            } else {
-                // Default behavior for new sessions
-                p.autoScroll = true
-                p.scrollToBottom()
-                log.Printf("[MESSAGES] Using default state for new session")
-            }
-        }
-    }
-    return nil
+				// If user was at bottom and there are new messages, stay at bottom
+				if sessionState.AutoScroll && hasNewMessages {
+					p.scrollToBottom()
+					log.Printf("[MESSAGES] Auto-scrolled to bottom due to new messages")
+				} else {
+					// Restore previous scroll position, but validate it
+					maxScroll := p.calculateMaxScroll()
+					p.scrollOffset = min(sessionState.ScrollOffset, maxScroll)
+					log.Printf("[MESSAGES] Restored scroll offset to %d (max=%d)", p.scrollOffset, maxScroll)
+				}
+			} else {
+				// Default behavior for new sessions
+				p.autoScroll = true
+				p.scrollToBottom()
+				log.Printf("[MESSAGES] Using default state for new session")
+			}
+		}
+	}
+	return nil
 }
 
 func (p *MessagesPanel) handleStateSync(event state.StateEvent) error {
-    p.version = event.Version
-    if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-        var payload types.StateSyncPayload
-        if err := decodePayload(payloadMap, &payload); err == nil {
-            p.currentSessionID = payload.State.CurrentSessionID
-            p.messages = p.filterMessagesForSession(payload.State.Messages, p.currentSessionID)
-            if p.autoScroll {
-                p.scrollToBottom()
-            }
-            log.Printf("[MESSAGES] v%v State synchronized", event.Version)
-        }
-    }
-    return nil
+	p.version = event.Version
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		var payload types.StateSyncPayload
+		if err := decodePayload(payloadMap, &payload); err == nil {
+			p.currentSessionID = payload.State.CurrentSessionID
+			p.messages = p.filterMessagesForSession(payload.State.Messages, p.currentSessionID)
+			if p.autoScroll {
+				p.scrollToBottom()
+			}
+			log.Printf("[MESSAGES] v%v State synchronized", event.Version)
+		}
+	}
+	return nil
 }
 
 func (p *MessagesPanel) handleThemeChanged(event state.StateEvent) error {
@@ -673,73 +673,73 @@ func (p *MessagesPanel) handleThemeChanged(event state.StateEvent) error {
 		log.Printf("[MESSAGES] Failed to decode theme change payload: %v", err)
 		return err
 	}
-	
+
 	log.Printf("[MESSAGES] Theme changed to: %s", payload.Theme)
-	
+
 	// Apply the theme change immediately
 	if err := theme.SetTheme(payload.Theme); err != nil {
 		log.Printf("[MESSAGES] Failed to set theme %s: %v", payload.Theme, err)
 		return err
 	}
-	
+
 	log.Printf("[MESSAGES] Successfully applied theme: %s", payload.Theme)
 	return nil
 }
 
 // handleAnyEvent logs any received event for diagnostics
 func (p *MessagesPanel) handleAnyEvent(event state.StateEvent) error {
-    p.version = event.Version
-    log.Printf("[MESSAGES] v%v Received event type: %s from %s", event.Version, event.Type, event.SourcePanel)
-    return nil
+	p.version = event.Version
+	log.Printf("[MESSAGES] v%v Received event type: %s from %s", event.Version, event.Type, event.SourcePanel)
+	return nil
 }
 
 // decodePayload converts a generic map payload into a concrete struct
 func decodePayload[T any](data map[string]interface{}, out *T) error {
-    b, err := json.Marshal(data)
-    if err != nil {
-        return fmt.Errorf("marshal payload: %w", err)
-    }
-    if err := json.Unmarshal(b, out); err != nil {
-        return fmt.Errorf("unmarshal payload: %w", err)
-    }
-    return nil
+	b, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		return fmt.Errorf("unmarshal payload: %w", err)
+	}
+	return nil
 }
 
 func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, tea.Cmd) {
-    switch event.Type {
-    case state.EventMessageAdded:
-        p.handleMessageAdded(event)
-    case state.EventMessageUpdated:
-        p.handleMessageUpdated(event)
-    case state.EventMessageDeleted:
-        p.handleMessageDeleted(event)
-    case state.EventSessionChanged:
-        p.handleSessionChanged(event)
-    case state.EventStateSync:
-        p.handleStateSync(event)
-    case types.EventThemeChanged:
-        p.handleThemeChanged(event)
-    }
-    return p, nil
+	switch event.Type {
+	case state.EventMessageAdded:
+		p.handleMessageAdded(event)
+	case state.EventMessageUpdated:
+		p.handleMessageUpdated(event)
+	case state.EventMessageDeleted:
+		p.handleMessageDeleted(event)
+	case state.EventSessionChanged:
+		p.handleSessionChanged(event)
+	case state.EventStateSync:
+		p.handleStateSync(event)
+	case types.EventThemeChanged:
+		p.handleThemeChanged(event)
+	}
+	return p, nil
 }
 
 // forwardEventToUI bridges IPC events into Bubble Tea by pushing into eventsChan
 func (p *MessagesPanel) forwardEventToUI(event state.StateEvent) error {
-    select {
-    case p.eventsChan <- event:
-    default:
-        // Drop if channel is full to avoid blocking
-        log.Printf("messages: events channel full, dropping event %s", event.Type)
-    }
-    return nil
+	select {
+	case p.eventsChan <- event:
+	default:
+		// Drop if channel is full to avoid blocking
+		log.Printf("messages: events channel full, dropping event %s", event.Type)
+	}
+	return nil
 }
 
 // subscribeEvents returns a command that waits for the next IPC event and emits it as a MessageEventMsg
 func (p *MessagesPanel) subscribeEvents() tea.Cmd {
-    return func() tea.Msg {
-        evt := <-p.eventsChan
-        return MessageEventMsg{Event: evt}
-    }
+	return func() tea.Msg {
+		evt := <-p.eventsChan
+		return MessageEventMsg{Event: evt}
+	}
 }
 
 func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model, tea.Cmd) {
@@ -753,7 +753,7 @@ func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model
 			}
 		}
 	}
-    return p, nil
+	return p, nil
 }
 
 // filterMessagesForSession filters messages for a specific session
@@ -840,8 +840,8 @@ func (p *MessagesPanel) renderMessages() string {
 
 	// Render visible lines directly
 	for _, line := range visibleLines {
-		// Skip rendering separator lines but preserve their space
 		if line.IsSeparator {
+			// Skip rendering separator lines but preserve their space
 			content += "\n"
 			continue
 		}
@@ -875,54 +875,11 @@ func (p *MessagesPanel) renderMessages() string {
 		content += lineStyle.Render(line.Content) + "\n"
 	}
 
-	// Footer with scroll indicator
-	maxScroll := p.calculateMaxScroll()
-	if maxScroll > 0 {
-		currentLine := p.scrollOffset + 1
-		totalLines := p.lineRenderer.totalLines
-		availableHeight := p.height - 6
-		endLine := min(currentLine+availableHeight-1, totalLines)
-
-		var scrollIndicator string
-		if availableHeight == 1 {
-			scrollIndicator = fmt.Sprintf("[Line %d/%d]", currentLine, totalLines)
-		} else {
-			scrollIndicator = fmt.Sprintf("[Lines %d-%d/%d]", currentLine, endLine, totalLines)
-		}
-
-		if !p.autoScroll {
-			scrollIndicator += " [MANUAL]"
-		}
-
-		content += "\n" + styles.NewStyle().
-			Foreground(t.TextMuted()).
-			Align(styles.Right).
-			Width(p.width).
-			Render(scrollIndicator)
-	}
-
-	// Help text
-	modeText := "plain"
-	if p.markdownMode {
-		modeText = "markdown"
-	}
-	content += "\n" + styles.NewStyle().
-		Foreground(t.TextMuted()).
-		Render(fmt.Sprintf("↑/k up • ↓/j down • PgUp/PgDn page • Home/End • t timestamps • a auto-scroll • m mode(%s) • r refresh • q quit", modeText))
-
-	log.Printf("[MESSAGES] Completed renderMessages")
 	return content
 }
 
-// calculateVisibleLines returns lines visible in the current scroll view using line-based rendering
+// calculateVisibleLines calculates which lines should be visible based on scroll position
 func (p *MessagesPanel) calculateVisibleLines() []RenderedLine {
-	if len(p.messages) == 0 {
-		log.Printf("[MESSAGES] No messages to display")
-		return []RenderedLine{}
-	}
-
-	// Calculate available height for messages (excluding header and footer)
-	// Account for: header (2 lines), scroll indicator (2 lines), help text (2 lines)
 	availableHeight := p.height - 6
 	if availableHeight <= 0 {
 		log.Printf("[MESSAGES] No available height for messages (height=%d)", p.height)
@@ -953,10 +910,10 @@ func (p *MessagesPanel) calculateVisibleLines() []RenderedLine {
 func (p *MessagesPanel) calculateMessageHeight(message types.MessageInfo) int {
 	// Start with base height for borders and padding
 	height := 3 // Top border, bottom border, and padding
-	
+
 	var content string
 	prefix := ""
-	
+
 	// Determine prefix based on message type
 	switch message.Type {
 	case "user":
@@ -968,7 +925,7 @@ func (p *MessagesPanel) calculateMessageHeight(message types.MessageInfo) int {
 	default:
 		prefix = fmt.Sprintf("%s: ", message.Type)
 	}
-	
+
 	// Calculate content with prefix
 	if p.markdownMode {
 		// For markdown mode, use util.ToMarkdown to get accurate line count
@@ -990,17 +947,17 @@ func (p *MessagesPanel) calculateMessageHeight(message types.MessageInfo) int {
 			height += 1 // At least one line
 		}
 	}
-	
+
 	// Add extra line for timestamp if enabled
 	if p.showTimestamps {
 		// Timestamp is added to first line, so no extra height needed
 	}
-	
+
 	// Add extra space for status indicators
 	if message.Status == "pending" || message.Status == "error" {
 		// Status indicators are added to last line, so no extra height needed
 	}
-	
+
 	return height
 }
 
@@ -1013,9 +970,12 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 
 	switch message.Type {
 	case "user":
-		// User messages: border box with theme text color for proper visibility
+		// User messages: border box with black text for better readability on light gray background
 		style = styles.NewStyle().
-			Foreground(t.Text()).
+			Foreground(compat.AdaptiveColor{
+				Light: lipgloss.Color("#000000"), // Black text for light mode
+				Dark:  lipgloss.Color("#000000"), // Black text for dark mode too
+			}).
 			Padding(1, 2).
 			MarginBottom(1).
 			BorderStyle(styles.RoundedBorder).
@@ -1064,7 +1024,7 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 	}
 
 	var content string
-	
+
 	// Render content based on mode
 	if p.markdownMode {
 		// Use transparent background for code blocks
@@ -1072,10 +1032,10 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 			Light: lipgloss.NoColor{},
 			Dark:  lipgloss.NoColor{},
 		}
-		
+
 		// Render the message content as markdown
 		renderedContent := util.ToMarkdown(message.Content, p.width-len(prefix)-4, backgroundColor)
-		
+
 		// Add prefix to each line of the rendered content
 		lines := strings.Split(renderedContent, "\n")
 		for i, line := range lines {
@@ -1090,7 +1050,7 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 	} else {
 		// Plain text mode
 		content = prefix + message.Content
-		
+
 		// Word wrap content to fit width
 		if p.width > 0 {
 			content = p.wordWrap(content, p.width-2)
@@ -1261,9 +1221,11 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 		// Set background color based on message type
 		var backgroundColor compat.AdaptiveColor
 		if message.Type == "user" {
-			// User messages use theme background for consistent styling
-			t := theme.CurrentTheme()
-			backgroundColor = t.BackgroundElement()
+			// User messages use light gray background with black text for better readability
+			backgroundColor = compat.AdaptiveColor{
+				Light: lipgloss.Color("#f5f5f5"), // Light gray background for light mode
+				Dark:  lipgloss.Color("#f5f5f5"), // Light gray background for dark mode too
+			}
 		} else {
 			// Other messages use transparent background for code blocks
 			backgroundColor = compat.AdaptiveColor{
