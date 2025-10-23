@@ -126,6 +126,7 @@ func NewMessagesPanel(httpClient *opencode.Client, socketPath string) *MessagesP
 	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.forwardEventToUI)
 	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.forwardEventToUI)
 	panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventUIActionTriggered, panel.handleUIActionTriggered)
 
 	// Wildcard handler to log receipt of any event type for diagnostics
 	panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
@@ -683,6 +684,27 @@ func (p *MessagesPanel) handleThemeChanged(event state.StateEvent) error {
 	}
 
 	log.Printf("[MESSAGES] Successfully applied theme: %s", payload.Theme)
+	return nil
+}
+
+// handleUIActionTriggered handles UI action triggered events
+func (p *MessagesPanel) handleUIActionTriggered(event state.StateEvent) error {
+	log.Printf("[MESSAGES] Received UI action triggered event: %+v", event)
+
+	// Extract action from the event payload
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		if actionRaw, exists := payloadMap["action"]; exists {
+			if action, ok := actionRaw.(string); ok {
+				log.Printf("[MESSAGES] UI action: %s", action)
+				// Messages panel doesn't need to handle modal dialogs directly
+				// These are typically handled by other panels or the main TUI
+				// Just log for now
+				return nil
+			}
+		}
+	}
+
+	log.Printf("[MESSAGES] Failed to extract action from UI action event payload")
 	return nil
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
-	"encoding/json"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/sst/opencode-sdk-go"
@@ -40,31 +40,32 @@ type SessionsPanel struct {
 func NewSessionsPanel(httpClient *opencode.Client, socketPath string) *SessionsPanel {
 	ctx, cancel := context.WithCancel(context.Background())
 
-panel := &SessionsPanel{
-    client:       httpClient,
-    ipcClient:    ipc.NewSocketClient(socketPath, "sessions-panel", "sessions"),
-    sessions:     make([]types.SessionInfo, 0),
-    currentIndex: 0,
-    ctx:          ctx,
-    cancel:       cancel,
-    eventsChan:   make(chan types.StateEvent, 64),
-}
+	panel := &SessionsPanel{
+		client:       httpClient,
+		ipcClient:    ipc.NewSocketClient(socketPath, "sessions-panel", "sessions"),
+		sessions:     make([]types.SessionInfo, 0),
+		currentIndex: 0,
+		ctx:          ctx,
+		cancel:       cancel,
+		eventsChan:   make(chan types.StateEvent, 64),
+	}
 
 	// Register event handlers
-    // Bridge IPC session events into Bubble Tea loop to force immediate UI refresh
-    panel.ipcClient.RegisterEventHandler(types.EventSessionAdded, panel.forwardSessionEventToUI)
-    panel.ipcClient.RegisterEventHandler(types.EventSessionDeleted, panel.forwardSessionEventToUI)
-    panel.ipcClient.RegisterEventHandler(types.EventSessionUpdated, panel.forwardSessionEventToUI)
-    panel.ipcClient.RegisterEventHandler(types.EventSessionChanged, panel.forwardSessionEventToUI)
-    panel.ipcClient.RegisterEventHandler(types.EventStateSync, panel.forwardSessionEventToUI)
-    panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardSessionEventToUI)
+	// Bridge IPC session events into Bubble Tea loop to force immediate UI refresh
+	panel.ipcClient.RegisterEventHandler(types.EventSessionAdded, panel.forwardSessionEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionDeleted, panel.forwardSessionEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionUpdated, panel.forwardSessionEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventSessionChanged, panel.forwardSessionEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventStateSync, panel.forwardSessionEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventThemeChanged, panel.forwardSessionEventToUI)
+	panel.ipcClient.RegisterEventHandler(types.EventUIActionTriggered, panel.forwardSessionEventToUI)
 
 	return panel
 }
 
 // Init initializes the panel
 func (p *SessionsPanel) Init() tea.Cmd {
-    var cmds []tea.Cmd
+	var cmds []tea.Cmd
 
 	// Connect to IPC server
 	cmds = append(cmds, func() tea.Msg {
@@ -86,9 +87,9 @@ func (p *SessionsPanel) Init() tea.Cmd {
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
-    // Subscribe to IPC events bridged via eventsChan
-    cmds = append(cmds, p.subscribeSessionEvents())
-    return tea.Batch(cmds...)
+	// Subscribe to IPC events bridged via eventsChan
+	cmds = append(cmds, p.subscribeSessionEvents())
+	return tea.Batch(cmds...)
 
 }
 
@@ -96,14 +97,14 @@ func (p *SessionsPanel) Init() tea.Cmd {
 // Prefer the client's server-known version; if unavailable (0), fall back to local panel version;
 // and as a last resort use 1 (initial state version).
 func (p *SessionsPanel) expectedVersion() int64 {
-    v := p.ipcClient.GetCurrentVersion()
-    if v <= 0 {
-        if p.version > 0 {
-            return p.version
-        }
-        return 1
-    }
-    return v
+	v := p.ipcClient.GetCurrentVersion()
+	if v <= 0 {
+		if p.version > 0 {
+			return p.version
+		}
+		return 1
+	}
+	return v
 }
 
 // Update handles messages and updates the panel state
@@ -158,9 +159,9 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The session change has already been processed, just trigger UI refresh
 		return p, nil
 
-    case SessionEventMsg:
-        _, cmd := p.handleSessionEvent(msg.Event)
-        return p, tea.Batch(cmd, p.subscribeSessionEvents())
+	case SessionEventMsg:
+		_, cmd := p.handleSessionEvent(msg.Event)
+		return p, tea.Batch(cmd, p.subscribeSessionEvents())
 
 	case ThemeChangedMsg:
 		log.Printf("[SESSIONS] Applying theme change: %s", msg.Theme)
@@ -231,17 +232,17 @@ func (p *SessionsPanel) selectCurrentSession() tea.Cmd {
 		// Immediately update the local currentSessionID for instant UI feedback
 		p.currentSessionID = session.ID
 
-        return func() tea.Msg {
-            versionToSend := p.expectedVersion()
-            log.Printf("[SESSIONS] Sending update with ExpectedVersion: %d", versionToSend)
+		return func() tea.Msg {
+			versionToSend := p.expectedVersion()
+			log.Printf("[SESSIONS] Sending update with ExpectedVersion: %d", versionToSend)
 
-            update := types.StateUpdate{
-                Type:            types.SessionChanged,
-                ExpectedVersion: versionToSend,
-                Payload:         types.SessionChangePayload{SessionID: session.ID},
-                SourcePanel:     "sessions-panel",
-                Timestamp:       time.Now(),
-            }
+			update := types.StateUpdate{
+				Type:            types.SessionChanged,
+				ExpectedVersion: versionToSend,
+				Payload:         types.SessionChangePayload{SessionID: session.ID},
+				SourcePanel:     "sessions-panel",
+				Timestamp:       time.Now(),
+			}
 
 			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 			if err != nil {
@@ -278,13 +279,13 @@ func (p *SessionsPanel) createNewSession() tea.Cmd {
 		}
 
 		// Send update
-        update := types.StateUpdate{
-            Type:            types.SessionAdded,
-            ExpectedVersion: p.expectedVersion(),
-            Payload:         types.SessionAddPayload{Session: sessionInfo},
-            SourcePanel:     "sessions-panel",
-            Timestamp:       time.Now(),
-        }
+		update := types.StateUpdate{
+			Type:            types.SessionAdded,
+			ExpectedVersion: p.expectedVersion(),
+			Payload:         types.SessionAddPayload{Session: sessionInfo},
+			SourcePanel:     "sessions-panel",
+			Timestamp:       time.Now(),
+		}
 
 		newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 		if err != nil {
@@ -302,13 +303,13 @@ func (p *SessionsPanel) deleteCurrentSession() tea.Cmd {
 		sessionID := p.sessions[p.currentIndex].ID
 		return func() tea.Msg {
 			// Send update first to remove from shared state
-        update := types.StateUpdate{
-            Type:            types.SessionDeleted,
-            ExpectedVersion: p.expectedVersion(),
-            Payload:         types.SessionDeletePayload{SessionID: sessionID},
-            SourcePanel:     "sessions-panel",
-            Timestamp:       time.Now(),
-        }
+			update := types.StateUpdate{
+				Type:            types.SessionDeleted,
+				ExpectedVersion: p.expectedVersion(),
+				Payload:         types.SessionDeletePayload{SessionID: sessionID},
+				SourcePanel:     "sessions-panel",
+				Timestamp:       time.Now(),
+			}
 
 			newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 			if err != nil {
@@ -367,7 +368,7 @@ func (p *SessionsPanel) handleSessionAdded(event types.StateEvent) error {
 			p.sessions = append(p.sessions, sessionAddPayload.Session)
 			p.version = event.Version
 			log.Printf("Session added: %s, version updated to %d", sessionAddPayload.Session.ID, p.version)
-			
+
 			// Trigger immediate UI update
 			if p.program != nil {
 				go func() {
@@ -394,7 +395,7 @@ func (p *SessionsPanel) handleSessionDeleted(event types.StateEvent) error {
 			}
 			p.version = event.Version
 			log.Printf("Session deleted: %s, version updated to %d", sessionDeletePayload.SessionID, p.version)
-			
+
 			// Trigger immediate UI update
 			if p.program != nil {
 				go func() {
@@ -424,7 +425,7 @@ func (p *SessionsPanel) handleSessionUpdated(event types.StateEvent) error {
 			}
 			p.version = event.Version
 			log.Printf("Session updated: %s, version updated to %d", sessionUpdatePayload.SessionID, p.version)
-			
+
 			// Trigger immediate UI update
 			if p.program != nil {
 				go func() {
@@ -445,7 +446,7 @@ func (p *SessionsPanel) handleSessionChanged(event types.StateEvent) error {
 			p.version = event.Version
 			p.updateCurrentIndex()
 			log.Printf("Session changed from %s to %s, version updated to %d", oldSessionID, sessionChangePayload.SessionID, p.version)
-			
+
 			// Trigger immediate UI update
 			if p.program != nil {
 				go func() {
@@ -467,7 +468,7 @@ func (p *SessionsPanel) handleStateSync(event types.StateEvent) error {
 			p.version = payload.State.Version.Version
 			p.updateCurrentIndex()
 			log.Printf("State synchronized from version %d to %d", oldVersion, p.version)
-			
+
 			// Trigger immediate UI update for state sync
 			if p.program != nil {
 				go func() {
@@ -491,17 +492,17 @@ func (p *SessionsPanel) handleThemeChanged(event types.StateEvent) error {
 		log.Printf("[SESSIONS] Failed to decode theme change payload: %v", err)
 		return err
 	}
-	
+
 	log.Printf("[SESSIONS] Theme changed to: %s", payload.Theme)
-	
+
 	// Apply the theme change immediately
 	if err := theme.SetTheme(payload.Theme); err != nil {
 		log.Printf("[SESSIONS] Failed to set theme %s: %v", payload.Theme, err)
 		return err
 	}
-	
+
 	log.Printf("[SESSIONS] Successfully applied theme: %s", payload.Theme)
-	
+
 	// Trigger immediate UI update for theme change
 	if p.program != nil {
 		go func() {
@@ -510,6 +511,26 @@ func (p *SessionsPanel) handleThemeChanged(event types.StateEvent) error {
 			})
 		}()
 	}
+	return nil
+}
+
+func (p *SessionsPanel) handleUIActionTriggered(event types.StateEvent) error {
+	log.Printf("[SESSIONS] Received UI action triggered event: %+v", event)
+
+	// Extract action from the event payload
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		if actionRaw, exists := payloadMap["action"]; exists {
+			if action, ok := actionRaw.(string); ok {
+				log.Printf("[SESSIONS] UI action: %s", action)
+				// Sessions panel doesn't need to handle modal dialogs directly
+				// These are typically handled by other panels or the main TUI
+				// Just log for now
+				return nil
+			}
+		}
+	}
+
+	log.Printf("[SESSIONS] Failed to extract action from UI action event payload")
 	return nil
 }
 
@@ -528,26 +549,28 @@ func (p *SessionsPanel) handleSessionEvent(event types.StateEvent) (tea.Model, t
 		p.handleStateSync(event)
 	case types.EventThemeChanged:
 		p.handleThemeChanged(event)
+	case types.EventUIActionTriggered:
+		p.handleUIActionTriggered(event)
 	}
 	return p, nil
 }
 
 // forwardSessionEventToUI bridges IPC session events into Bubble Tea by pushing into eventsChan
 func (p *SessionsPanel) forwardSessionEventToUI(event types.StateEvent) error {
-    select {
-    case p.eventsChan <- event:
-    default:
-        log.Printf("sessions: events channel full, dropping event %s", event.Type)
-    }
-    return nil
+	select {
+	case p.eventsChan <- event:
+	default:
+		log.Printf("sessions: events channel full, dropping event %s", event.Type)
+	}
+	return nil
 }
 
 // subscribeSessionEvents returns a command that waits for the next IPC event and emits it as a SessionEventMsg
 func (p *SessionsPanel) subscribeSessionEvents() tea.Cmd {
-    return func() tea.Msg {
-        evt := <-p.eventsChan
-        return SessionEventMsg{Event: evt}
-    }
+	return func() tea.Msg {
+		evt := <-p.eventsChan
+		return SessionEventMsg{Event: evt}
+	}
 }
 
 // updateCurrentIndex updates the current index based on current session ID
@@ -592,7 +615,7 @@ func (p *SessionsPanel) renderSessionsList() string {
 
 		var style styles.Style
 		var prefix string
-		
+
 		if isSelected {
 			// 样式选项2: 反色高亮（类似传统终端选择）
 			style = styles.NewStyle().
@@ -746,7 +769,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
-		<-		sigChan
+		<-sigChan
 		log.Printf("Received signal, shutting down sessions panel")
 		cancel()
 		program.Quit()

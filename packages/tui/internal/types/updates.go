@@ -22,6 +22,7 @@ const (
 	ThemeChanged      UpdateType = "theme_changed"
 	ModelChanged      UpdateType = "model_changed"
 	AgentChanged      UpdateType = "agent_changed"
+	UIActionTriggered UpdateType = "ui_action_triggered"
 )
 
 // StateUpdate represents an atomic state change operation
@@ -106,6 +107,12 @@ type ModelChangePayload struct {
 // AgentChangePayload represents agent selection changes
 type AgentChangePayload struct {
 	Agent string `json:"agent"`
+}
+
+// UIActionPayload represents UI action triggers
+type UIActionPayload struct {
+	Action string                 `json:"action"`
+	Data   map[string]interface{} `json:"data,omitempty"`
 }
 
 // Event payload structures

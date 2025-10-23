@@ -24,6 +24,13 @@ import (
 )
 
 // InputPanel manages the user input panel
+// ModelInfo represents a model available for selection
+type ModelInfo struct {
+	Provider string
+	Model    string
+	Name     string
+}
+
 type InputPanel struct {
 	client              *opencode.Client
 	ipcClient           *ipc.SocketClient
@@ -31,7 +38,7 @@ type InputPanel struct {
 	cursorPosition      int
 	selectionStart      int
 	selectionEnd        int
-	mode                string // "normal", "command", "multiline"
+	mode                string // "normal", "command", "multiline", "model_select"
 	history             []string
 	historyIndex        int
 	currentSessionID    string
@@ -53,6 +60,12 @@ type InputPanel struct {
 	// Theme switching state
 	comfortableThemes []string // List of comfortable themes for cycling
 	currentThemeIndex int      // Current index in comfortable themes list
+	// Model selection state
+	showModelDialog   bool        // Whether model selection dialog is visible
+	modelSearchQuery  string      // Current search query in model dialog
+	modelSelectedIdx  int         // Currently selected model index
+	modelScrollOffset int         // Current scroll offset in model list
+	availableModels   []ModelInfo // Available models for selection
 }
 
 // NewInputPanel creates a new input panel
@@ -98,6 +111,7 @@ func NewInputPanel(httpClient *opencode.Client, socketPath string) *InputPanel {
 	panel.ipcClient.RegisterEventHandler(state.EventCursorMoved, panel.handleCursorMoved)
 	panel.ipcClient.RegisterEventHandler(state.EventSessionChanged, panel.handleSessionChanged)
 	panel.ipcClient.RegisterEventHandler(state.EventStateSync, panel.handleStateSync)
+	panel.ipcClient.RegisterEventHandler(types.EventUIActionTriggered, panel.handleUIActionTriggered)
 	// Wildcard handler for diagnostics: log all incoming events
 	panel.ipcClient.RegisterEventHandler(types.StateEventType("*"), panel.handleAnyEvent)
 
@@ -359,6 +373,9 @@ func (p *InputPanel) sendUpdateWithRetry(update types.StateUpdate) (int64, error
 
 // View renders the input panel
 func (p *InputPanel) View() string {
+	if p.showModelDialog {
+		return p.renderModelDialog()
+	}
 	return p.renderInput()
 }
 
@@ -366,6 +383,11 @@ func (p *InputPanel) View() string {
 func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Log all keyboard input for debugging
 	log.Printf("[INPUT] Key pressed: %q", msg.String())
+
+	// Handle model selection dialog keys
+	if p.showModelDialog && p.mode == "model_select" {
+		return p.handleModelDialogKeys(msg)
+	}
 
 	switch msg.String() {
 	case "ctrl+c":
@@ -708,6 +730,25 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	case "/help":
 		// 显示内置帮助视图，而不是发送无处渲染的 InfoMsg
 		p.showHelp = true
+	case "/models":
+		// 显示模型选择对话框
+		p.showModelDialog = true
+		p.mode = "model_select"
+		p.modelSearchQuery = ""
+		p.modelSelectedIdx = 0
+		// 初始化可用模型列表（这里使用示例数据，实际应该从API获取）
+		p.availableModels = []ModelInfo{
+			{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
+			{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
+			{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
+			{Provider: "OpenCode Zen", Model: "claude-3-5-sonnet", Name: "Claude 3.5 Sonnet"},
+			{Provider: "OpenCode Zen", Model: "gpt-4o", Name: "GPT-4o"},
+			{Provider: "OpenCode Zen", Model: "gpt-4o-mini", Name: "GPT-4o Mini"},
+			{Provider: "OpenCode Zen", Model: "gemini-pro", Name: "Gemini Pro"},
+			{Provider: "OpenCode Zen", Model: "llama-3-70b", Name: "Llama 3 70B"},
+			{Provider: "OpenCode Zen", Model: "mistral-large", Name: "Mistral Large"},
+			{Provider: "OpenCode Zen", Model: "codestral", Name: "Codestral"},
+		}
 	case "/clear":
 		cmdToExecute = p.clearMessages()
 	case "/new":
@@ -954,6 +995,44 @@ func (p *InputPanel) handleStateSync(event types.StateEvent) error {
 			}
 		}
 	}
+	return nil
+}
+
+// handleUIActionTriggered handles UI action triggered events
+func (p *InputPanel) handleUIActionTriggered(event types.StateEvent) error {
+	log.Printf("[INPUT] Received UI action triggered event: %+v", event)
+
+	// Extract action from the event payload
+	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		if actionRaw, exists := payloadMap["action"]; exists {
+			if action, ok := actionRaw.(string); ok {
+				log.Printf("[INPUT] UI action: %s", action)
+
+				// Handle open_models action by showing model selection dialog
+				if action == "open_models" {
+					p.showModelDialog = true
+					p.mode = "model_select"
+					p.modelSearchQuery = ""
+					p.modelSelectedIdx = 0
+					// Initialize with some mock models for now
+					p.availableModels = []ModelInfo{
+						{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
+						{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
+						{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
+					}
+
+					// Trigger UI update
+					if p.program != nil {
+						p.program.Send(InfoMsg{Message: "Model selection dialog opened"})
+					}
+				}
+
+				return nil
+			}
+		}
+	}
+
+	log.Printf("[INPUT] Failed to extract action from UI action event payload")
 	return nil
 }
 
@@ -1235,6 +1314,163 @@ func (p *InputPanel) changeAgent(agent string) tea.Cmd {
 }
 
 // cycleTheme cycles through comfortable themes
+// handleModelDialogKeys handles keyboard input when model selection dialog is active
+func (p *InputPanel) handleModelDialogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "escape":
+		// Close model dialog
+		p.showModelDialog = false
+		p.mode = "normal"
+		return p, nil
+
+	case "enter":
+		// Select current model
+		if p.modelSelectedIdx < len(p.availableModels) {
+			selectedModel := p.availableModels[p.modelSelectedIdx]
+			p.showModelDialog = false
+			p.mode = "normal"
+			return p, p.changeModel(selectedModel.Provider, selectedModel.Model)
+		}
+		return p, nil
+
+	case "up":
+		// Move selection up
+		if p.modelSelectedIdx > 0 {
+			p.modelSelectedIdx--
+			p.updateModelScrollOffset()
+		}
+		return p, nil
+
+	case "down":
+		// Move selection down
+		if p.modelSelectedIdx < len(p.availableModels)-1 {
+			p.modelSelectedIdx++
+			p.updateModelScrollOffset()
+		}
+		return p, nil
+
+	case "page_up", "ctrl+u":
+		// Page up in model list
+		dialogHeight := min(p.height-4, 20)
+		maxModels := dialogHeight - 8
+		if p.modelSearchQuery != "" {
+			maxModels = dialogHeight - 5
+		}
+
+		p.modelSelectedIdx = max(0, p.modelSelectedIdx-maxModels)
+		p.updateModelScrollOffset()
+		return p, nil
+
+	case "page_down", "ctrl+d":
+		// Page down in model list
+		dialogHeight := min(p.height-4, 20)
+		maxModels := dialogHeight - 8
+		if p.modelSearchQuery != "" {
+			maxModels = dialogHeight - 5
+		}
+
+		p.modelSelectedIdx = min(len(p.availableModels)-1, p.modelSelectedIdx+maxModels)
+		p.updateModelScrollOffset()
+		return p, nil
+
+	case "home", "ctrl+a":
+		// Go to first model
+		p.modelSelectedIdx = 0
+		p.modelScrollOffset = 0
+		return p, nil
+
+	case "end", "ctrl+e":
+		// Go to last model
+		p.modelSelectedIdx = len(p.availableModels) - 1
+		p.updateModelScrollOffset()
+		return p, nil
+
+	default:
+		// Handle search input
+		if len(msg.String()) == 1 {
+			p.modelSearchQuery += msg.String()
+			p.filterModels()
+			p.modelSelectedIdx = 0
+			p.modelScrollOffset = 0
+			return p, nil
+		}
+
+		// Handle backspace in search
+		if msg.String() == "backspace" && len(p.modelSearchQuery) > 0 {
+			p.modelSearchQuery = p.modelSearchQuery[:len(p.modelSearchQuery)-1]
+			p.filterModels()
+			p.modelSelectedIdx = 0
+			p.modelScrollOffset = 0
+			return p, nil
+		}
+	}
+
+	return p, nil
+}
+
+// updateModelScrollOffset adjusts scroll offset to keep selected item visible
+func (p *InputPanel) updateModelScrollOffset() {
+	dialogHeight := min(p.height-4, 20)
+	maxModels := dialogHeight - 8 // Reserve space for header, search, etc.
+	if p.modelSearchQuery != "" {
+		maxModels = dialogHeight - 5 // Less space needed when no recent section
+	}
+
+	// Ensure selected item is visible
+	if p.modelSelectedIdx < p.modelScrollOffset {
+		p.modelScrollOffset = p.modelSelectedIdx
+	} else if p.modelSelectedIdx >= p.modelScrollOffset+maxModels {
+		p.modelScrollOffset = p.modelSelectedIdx - maxModels + 1
+	}
+
+	// Ensure scroll offset doesn't go negative
+	if p.modelScrollOffset < 0 {
+		p.modelScrollOffset = 0
+	}
+
+	// Ensure scroll offset doesn't exceed available models
+	maxOffset := len(p.availableModels) - maxModels
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if p.modelScrollOffset > maxOffset {
+		p.modelScrollOffset = maxOffset
+	}
+}
+
+// filterModels filters available models based on search query
+func (p *InputPanel) filterModels() {
+	// Reset to all models if no search query
+	if p.modelSearchQuery == "" {
+		p.availableModels = []ModelInfo{
+			{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
+			{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
+			{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
+		}
+	} else {
+		// Simple filtering based on name
+		allModels := []ModelInfo{
+			{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
+			{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
+			{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
+		}
+
+		p.availableModels = []ModelInfo{}
+		query := strings.ToLower(p.modelSearchQuery)
+		for _, model := range allModels {
+			if strings.Contains(strings.ToLower(model.Name), query) ||
+				strings.Contains(strings.ToLower(model.Model), query) {
+				p.availableModels = append(p.availableModels, model)
+			}
+		}
+	}
+
+	// Reset selection if out of bounds
+	if p.modelSelectedIdx >= len(p.availableModels) {
+		p.modelSelectedIdx = 0
+	}
+}
+
 func (p *InputPanel) cycleTheme() (tea.Model, tea.Cmd) {
 	// Move to next theme in the list
 	p.currentThemeIndex = (p.currentThemeIndex + 1) % len(p.comfortableThemes)
@@ -1601,6 +1837,195 @@ Keyboard Shortcuts:
 		Render(strings.TrimSpace(helpContent))
 }
 
+func (p *InputPanel) renderModelDialog() string {
+	var result strings.Builder
+
+	// Calculate dialog dimensions
+	dialogWidth := min(p.width-4, 60)   // Leave margin and max width
+	dialogHeight := min(p.height-4, 20) // Leave margin and max height
+
+	// Top border
+	result.WriteString("┌" + strings.Repeat("─", dialogWidth-2) + "┐\n")
+
+	// Title line with close hint
+	title := " Select Model "
+	closeHint := " esc "
+	padding := dialogWidth - len(title) - len(closeHint) - 2
+	if padding < 0 {
+		padding = 0
+	}
+	result.WriteString("│" + title + strings.Repeat(" ", padding) + closeHint + "│\n")
+
+	// Separator
+	result.WriteString("├" + strings.Repeat("─", dialogWidth-2) + "┤\n")
+
+	// Search box
+	searchPrompt := " 🔍 Search models..."
+	if p.modelSearchQuery != "" {
+		searchPrompt = " 🔍 " + p.modelSearchQuery
+	}
+	searchPadding := dialogWidth - len(searchPrompt) - 2
+	if searchPadding < 0 {
+		searchPadding = 0
+	}
+	result.WriteString("│" + searchPrompt + strings.Repeat(" ", searchPadding) + "│\n")
+
+	// Empty line
+	result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+
+	// Recent section (if no search query)
+	if p.modelSearchQuery == "" {
+		recentTitle := " Recent"
+		recentPadding := dialogWidth - len(recentTitle) - 2
+		if recentPadding < 0 {
+			recentPadding = 0
+		}
+		result.WriteString("│" + recentTitle + strings.Repeat(" ", recentPadding) + "│\n")
+
+		// Recent model
+		recentModel := "   Grok Code Fast 1  OpenCode Zen"
+		if len(recentModel) > dialogWidth-2 {
+			recentModel = recentModel[:dialogWidth-5] + "..."
+		}
+		recentPadding = dialogWidth - len(recentModel) - 2
+		if recentPadding < 0 {
+			recentPadding = 0
+		}
+		result.WriteString("│" + recentModel + strings.Repeat(" ", recentPadding) + "│\n")
+
+		// Empty line
+		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+
+		// Provider section
+		providerTitle := " OpenCode Zen"
+		providerPadding := dialogWidth - len(providerTitle) - 2
+		if providerPadding < 0 {
+			providerPadding = 0
+		}
+		result.WriteString("│" + providerTitle + strings.Repeat(" ", providerPadding) + "│\n")
+	}
+
+	// Calculate available space for models
+	maxModels := dialogHeight - 8 // Reserve space for header, search, etc.
+	if p.modelSearchQuery != "" {
+		maxModels = dialogHeight - 5 // Less space needed when no recent section
+	}
+
+	// Calculate scroll indicators
+	totalModels := len(p.availableModels)
+	showScrollUp := p.modelScrollOffset > 0
+	showScrollDown := p.modelScrollOffset+maxModels < totalModels
+
+	// Add scroll up indicator if needed
+	if showScrollUp {
+		scrollUpLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↑" + strings.Repeat(" ", (dialogWidth-3)/2)
+		if len(scrollUpLine) > dialogWidth-2 {
+			scrollUpLine = scrollUpLine[:dialogWidth-2]
+		}
+		scrollUpPadding := dialogWidth - len(scrollUpLine) - 2
+		if scrollUpPadding < 0 {
+			scrollUpPadding = 0
+		}
+		result.WriteString("│" + scrollUpLine + strings.Repeat(" ", scrollUpPadding) + "│\n")
+		maxModels-- // Reduce available space for models
+	}
+
+	// Render visible models with scroll offset
+	visibleStart := p.modelScrollOffset
+	visibleEnd := min(visibleStart+maxModels, totalModels)
+
+	for i := visibleStart; i < visibleEnd; i++ {
+		model := p.availableModels[i]
+
+		prefix := "   "
+		if i == p.modelSelectedIdx {
+			prefix = " ▶ " // Selection indicator with proper spacing
+		}
+
+		modelLine := prefix + model.Name + "  " + model.Provider
+		if len(modelLine) > dialogWidth-2 {
+			modelLine = modelLine[:dialogWidth-5] + "..."
+		}
+
+		modelPadding := dialogWidth - len(modelLine) - 2
+		if modelPadding < 0 {
+			modelPadding = 0
+		}
+		result.WriteString("│" + modelLine + strings.Repeat(" ", modelPadding) + "│\n")
+
+		// Add underline for selected model on the next line
+		if i == p.modelSelectedIdx {
+			// Create underline for the model name part only
+			nameLength := len(model.Name)
+			prefixLength := 4                            // Length of " ▶ "
+			if nameLength > dialogWidth-prefixLength-6 { // Account for prefix, provider and padding
+				nameLength = dialogWidth - prefixLength - 6
+			}
+			underline := strings.Repeat("─", nameLength)
+			underlineLine := strings.Repeat(" ", prefixLength) + underline
+			underlinePadding := dialogWidth - len(underlineLine) - 2
+			if underlinePadding < 0 {
+				underlinePadding = 0
+			}
+			result.WriteString("│" + underlineLine + strings.Repeat(" ", underlinePadding) + "│\n")
+		}
+	}
+
+	// Add scroll down indicator if needed
+	if showScrollDown {
+		scrollDownLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↓" + strings.Repeat(" ", (dialogWidth-3)/2)
+		if len(scrollDownLine) > dialogWidth-2 {
+			scrollDownLine = scrollDownLine[:dialogWidth-2]
+		}
+		scrollDownPadding := dialogWidth - len(scrollDownLine) - 2
+		if scrollDownPadding < 0 {
+			scrollDownPadding = 0
+		}
+		result.WriteString("│" + scrollDownLine + strings.Repeat(" ", scrollDownPadding) + "│\n")
+		maxModels-- // Account for scroll indicator space
+	}
+
+	// Fill remaining space if needed
+	currentLines := 5 // header lines
+	if p.modelSearchQuery == "" {
+		currentLines += 4 // recent section lines
+	}
+	if showScrollUp {
+		currentLines++
+	}
+	currentLines += (visibleEnd - visibleStart) // visible models
+	if showScrollDown {
+		currentLines++
+	}
+
+	for currentLines < dialogHeight-1 {
+		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+		currentLines++
+	}
+
+	// Bottom border
+	result.WriteString("└" + strings.Repeat("─", dialogWidth-2) + "┘")
+
+	// Add scroll position indicator in bottom right corner if there are many models
+	if totalModels > maxModels {
+		scrollInfo := fmt.Sprintf(" %d/%d ", p.modelSelectedIdx+1, totalModels)
+		bottomLine := result.String()
+		lines := strings.Split(bottomLine, "\n")
+		if len(lines) > 0 {
+			lastLine := lines[len(lines)-1]
+			if len(lastLine) >= len(scrollInfo)+1 {
+				// Replace part of bottom border with scroll info
+				newLastLine := lastLine[:len(lastLine)-len(scrollInfo)-1] + scrollInfo + "┘"
+				lines[len(lines)-1] = newLastLine
+				result.Reset()
+				result.WriteString(strings.Join(lines, "\n"))
+			}
+		}
+	}
+
+	return result.String()
+}
+
 // Message types
 type ConnectedMsg struct{}
 
@@ -1664,7 +2089,7 @@ func (p *InputPanel) readClipboard() tea.Cmd {
 		}
 
 		content := string(output)
-		log.Printf("[INPUT] Clipboard content read successfully: %q (length: %d)", content, len(content))
+		log.Printf("[INPUT] Clipboard content received successfully: %q (length: %d)", content, len(content))
 
 		return ClipboardReadMsg{
 			Content: content,

@@ -21,19 +21,21 @@ type CursorMovePayload = types.CursorMovePayload
 type ThemeChangePayload = types.ThemeChangePayload
 type ModelChangePayload = types.ModelChangePayload
 type AgentChangePayload = types.AgentChangePayload
+type UIActionPayload = types.UIActionPayload
 
 // Re-export constants
 const (
-	SessionChanged = types.SessionChanged
-	SessionAdded   = types.SessionAdded
-	SessionDeleted = types.SessionDeleted
-	SessionUpdated = types.SessionUpdated
-	MessageAdded   = types.MessageAdded
-	MessageUpdated = types.MessageUpdated
-	MessageDeleted = types.MessageDeleted
-	InputUpdated   = types.InputUpdated
-	CursorMoved    = types.CursorMoved
-	ThemeChanged   = types.ThemeChanged
-	ModelChanged   = types.ModelChanged
-	AgentChanged   = types.AgentChanged
+	SessionChanged    = types.SessionChanged
+	SessionAdded      = types.SessionAdded
+	SessionDeleted    = types.SessionDeleted
+	SessionUpdated    = types.SessionUpdated
+	MessageAdded      = types.MessageAdded
+	MessageUpdated    = types.MessageUpdated
+	MessageDeleted    = types.MessageDeleted
+	InputUpdated      = types.InputUpdated
+	CursorMoved       = types.CursorMoved
+	ThemeChanged      = types.ThemeChanged
+	ModelChanged      = types.ModelChanged
+	AgentChanged      = types.AgentChanged
+	UIActionTriggered = types.UIActionTriggered
 )

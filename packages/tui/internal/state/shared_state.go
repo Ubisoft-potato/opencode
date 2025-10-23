@@ -32,6 +32,7 @@ const (
 	EventThemeChanged      = types.EventThemeChanged
 	EventModelChanged      = types.EventModelChanged
 	EventAgentChanged      = types.EventAgentChanged
+	EventUIActionTriggered = types.EventUIActionTriggered
 	EventStateSync         = types.EventStateSync
 	EventPanelConnected    = types.EventPanelConnected
 	EventPanelDisconnected = types.EventPanelDisconnected

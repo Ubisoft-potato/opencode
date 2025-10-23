@@ -212,6 +212,8 @@ func CreateEventFromUpdate(update types.StateUpdate, version int64) types.StateE
 		eventType = types.EventModelChanged
 	case types.AgentChanged:
 		eventType = types.EventAgentChanged
+	case types.UIActionTriggered:
+		eventType = types.EventUIActionTriggered
 	default:
 		eventType = types.EventStateSync
 	}

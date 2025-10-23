@@ -233,7 +233,7 @@ func (manager *PanelSyncManager) UpdateInputBuffer(buffer string, cursorPos, sel
 		ID:              generateUpdateID(),
 		Type:            types.InputUpdated,
 		ExpectedVersion: manager.state.GetCurrentVersion(),
-		Payload:         types.InputUpdatePayload{
+		Payload: types.InputUpdatePayload{
 			Buffer:         buffer,
 			CursorPosition: cursorPos,
 			SelectionStart: selStart,
@@ -305,20 +305,20 @@ func (manager *PanelSyncManager) ChangeAgent(agent string, panelID string) error
 
 // applyUpdateWithEvents applies an update and broadcasts events
 func (manager *PanelSyncManager) applyUpdateWithEvents(update types.StateUpdate) error {
-    // Apply update with conflict resolution
-    result := manager.conflictResolver.ResolveConflict(manager, update)
-    if !result.Success {
-        manager.metrics.RecordUpdate(update.Type, false, result.TimeTaken)
-        return result.Error
-    }
+	// Apply update with conflict resolution
+	result := manager.conflictResolver.ResolveConflict(manager, update)
+	if !result.Success {
+		manager.metrics.RecordUpdate(update.Type, false, result.TimeTaken)
+		return result.Error
+	}
 
-    manager.metrics.RecordUpdate(update.Type, true, result.TimeTaken)
+	manager.metrics.RecordUpdate(update.Type, true, result.TimeTaken)
 
-    // Queue save operation if auto-save is enabled
-    if manager.autoSaveEnabled {
-        select {
-        case manager.saveQueue <- saveRequest{state: manager.state.Clone(), callback: nil}:
-            // Save queued successfully
+	// Queue save operation if auto-save is enabled
+	if manager.autoSaveEnabled {
+		select {
+		case manager.saveQueue <- saveRequest{state: manager.state.Clone(), callback: nil}:
+			// Save queued successfully
 		default:
 			// Save queue full, log warning
 			log.Printf("Save queue full, skipping auto-save for update %s", update.Type)
@@ -330,33 +330,33 @@ func (manager *PanelSyncManager) applyUpdateWithEvents(update types.StateUpdate)
 
 // UpdateWithVersionCheck applies a state update with optimistic locking
 func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate) error {
-    // Acquire lock to perform version check and apply updates atomically.
-    // IMPORTANT: Do NOT hold the lock while invoking the conflict resolver,
-    // which calls UpdateWithVersionCheck again and would deadlock.
-    manager.syncMutex.Lock()
+	// Acquire lock to perform version check and apply updates atomically.
+	// IMPORTANT: Do NOT hold the lock while invoking the conflict resolver,
+	// which calls UpdateWithVersionCheck again and would deadlock.
+	manager.syncMutex.Lock()
 
-    // Check for version conflicts (optimistic locking)
-    if manager.state.Version.Version != update.ExpectedVersion {
-        // Release lock before invoking resolver to avoid re-entrant deadlock.
-        manager.syncMutex.Unlock()
+	// Check for version conflicts (optimistic locking)
+	if manager.state.Version.Version != update.ExpectedVersion {
+		// Release lock before invoking resolver to avoid re-entrant deadlock.
+		manager.syncMutex.Unlock()
 
-        // Attempt to resolve the conflict using the configured resolver
-        if manager.conflictResolver != nil {
-            result := manager.conflictResolver.ResolveConflict(manager, update)
-            if result != nil && result.Success {
-                // Conflict resolved and update applied within resolver path
-                // Return early to avoid double application/broadcast
-                return nil
-            }
-            // If resolver did not succeed, fall through to original error
-        }
+		// Attempt to resolve the conflict using the configured resolver
+		if manager.conflictResolver != nil {
+			result := manager.conflictResolver.ResolveConflict(manager, update)
+			if result != nil && result.Success {
+				// Conflict resolved and update applied within resolver path
+				// Return early to avoid double application/broadcast
+				return nil
+			}
+			// If resolver did not succeed, fall through to original error
+		}
 
-        return fmt.Errorf("version conflict: expected %d, current %d",
-            update.ExpectedVersion, manager.GetState().GetCurrentVersion())
-    }
+		return fmt.Errorf("version conflict: expected %d, current %d",
+			update.ExpectedVersion, manager.GetState().GetCurrentVersion())
+	}
 
-    // No conflict: ensure we unlock on all return paths below
-    defer manager.syncMutex.Unlock()
+	// No conflict: ensure we unlock on all return paths below
+	defer manager.syncMutex.Unlock()
 
 	// Apply the update based on its type
 	switch update.Type {
@@ -489,6 +489,11 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 		}
 		manager.state.Agent = payload.Agent
 
+	case types.UIActionTriggered:
+		// UI actions don't modify state directly, they just trigger events
+		// The payload is passed through to the event for panels to handle
+		log.Printf("UI action triggered: %+v", update.Payload)
+
 	default:
 		log.Printf("Warning: unhandled update type in UpdateWithVersionCheck: %s. Bumping version only.", update.Type)
 	}
@@ -500,13 +505,12 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 	manager.state.LastUpdate = time.Now()
 	manager.state.UpdateCount++
 
-    // Create and broadcast event
-    event := CreateEventFromUpdate(update, manager.state.Version.Version)
-    manager.eventBus.Broadcast(event)
+	// Create and broadcast event
+	event := CreateEventFromUpdate(update, manager.state.Version.Version)
+	manager.eventBus.Broadcast(event)
 
-    return nil
+	return nil
 }
-
 
 // GetState returns a copy of the current state
 func (manager *PanelSyncManager) GetState() *types.SharedApplicationState {
@@ -665,19 +669,19 @@ func generateUpdateID() string {
 // SyncMetrics tracks synchronization performance metrics
 type SyncMetrics struct {
 	mutex                sync.RWMutex
-	TotalUpdates         int64                    `json:"total_updates"`
-	SuccessfulUpdates    int64                    `json:"successful_updates"`
-	FailedUpdates        int64                    `json:"failed_updates"`
-	UpdatesByType        map[types.UpdateType]int64     `json:"updates_by_type"`
-	TotalSaves           int64                    `json:"total_saves"`
-	SuccessfulSaves      int64                    `json:"successful_saves"`
-	FailedSaves          int64                    `json:"failed_saves"`
-	AverageUpdateLatency time.Duration           `json:"average_update_latency"`
-	AverageSaveLatency   time.Duration           `json:"average_save_latency"`
-	LastUpdateTime       time.Time               `json:"last_update_time"`
-	LastSaveTime         time.Time               `json:"last_save_time"`
-	InitializationTime   time.Time               `json:"initialization_time"`
-	IsInitialized        bool                    `json:"is_initialized"`
+	TotalUpdates         int64                      `json:"total_updates"`
+	SuccessfulUpdates    int64                      `json:"successful_updates"`
+	FailedUpdates        int64                      `json:"failed_updates"`
+	UpdatesByType        map[types.UpdateType]int64 `json:"updates_by_type"`
+	TotalSaves           int64                      `json:"total_saves"`
+	SuccessfulSaves      int64                      `json:"successful_saves"`
+	FailedSaves          int64                      `json:"failed_saves"`
+	AverageUpdateLatency time.Duration              `json:"average_update_latency"`
+	AverageSaveLatency   time.Duration              `json:"average_save_latency"`
+	LastUpdateTime       time.Time                  `json:"last_update_time"`
+	LastSaveTime         time.Time                  `json:"last_save_time"`
+	InitializationTime   time.Time                  `json:"initialization_time"`
+	IsInitialized        bool                       `json:"is_initialized"`
 }
 
 // NewSyncMetrics creates a new sync metrics tracker
