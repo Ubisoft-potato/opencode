@@ -460,8 +460,9 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		p.cursorPosition = 0
 		return p, p.syncInputState()
 
-	case "ctrl+v", "cmd+v":
-		// Handle paste - request clipboard content (both Ctrl+V and Cmd+V for Mac)
+	case "ctrl+v", "cmd+v", "ctrl+shift+v", "f2":
+		// Handle paste - request clipboard content (multiple key combinations for compatibility)
+		// F2 is added as an alternative paste key that VS Code won't intercept
 		log.Printf("[INPUT] Paste key detected: %q", msg.String())
 		log.Printf("[INPUT] Attempting to read clipboard...")
 		return p, p.readClipboard()
