@@ -66,6 +66,9 @@ type InputPanel struct {
 	modelSelectedIdx  int         // Currently selected model index
 	modelScrollOffset int         // Current scroll offset in model list
 	availableModels   []ModelInfo // Available models for selection
+	// Current model information
+	currentProvider string // Current selected provider
+	currentModel    string // Current selected model
 }
 
 // NewInputPanel creates a new input panel
@@ -216,6 +219,11 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.history = msg.State.Input.History
 			p.historyIndex = msg.State.Input.HistoryIndex
 			p.version = msg.State.Version.Version
+
+			// Update current model information
+			p.currentProvider = msg.State.Provider
+			p.currentModel = msg.State.Model
+			log.Printf("[INPUT] Model info loaded: Provider='%s', Model='%s'", p.currentProvider, p.currentModel)
 		} else {
 			log.Printf("[INPUT] No state available, using defaults")
 			// Initialize with default values
@@ -228,6 +236,8 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.mode = "normal"
 			p.history = make([]string, 0)
 			p.historyIndex = -1
+			p.currentProvider = ""
+			p.currentModel = ""
 		}
 		return p, nil
 
@@ -285,6 +295,24 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrorMsg:
 		log.Printf("Input panel error: %v", msg.Error)
+		return p, nil
+
+	case InfoMsg:
+		log.Printf("Input panel info: %s", msg.Message)
+		// If this is a model change message, trigger a state request to update UI
+		if strings.Contains(msg.Message, "Model changed to") {
+			return p, func() tea.Msg {
+				// Request fresh state from server to get updated model information
+				if p.ipcClient != nil {
+					if currentState, err := p.ipcClient.RequestState(); err == nil {
+						return StateLoadedMsg{State: currentState}
+					} else {
+						log.Printf("[INPUT] Failed to request state after model change: %v", err)
+					}
+				}
+				return nil
+			}
+		}
 		return p, nil
 
 	case InputEventMsg:
@@ -963,6 +991,11 @@ func (p *InputPanel) handleStateSync(event types.StateEvent) error {
 				p.history = payload.State.Input.History
 				p.historyIndex = payload.State.Input.HistoryIndex
 
+				// Update current model information
+				p.currentProvider = payload.State.Provider
+				p.currentModel = payload.State.Model
+				log.Printf("[INPUT] Model info updated: Provider='%s', Model='%s'", p.currentProvider, p.currentModel)
+
 				// Update session title when we receive state sync
 				if sessionInfo, found := payload.State.GetSessionByID(p.currentSessionID); found {
 					oldTitle := p.currentSessionTitle
@@ -1640,11 +1673,15 @@ func (p *InputPanel) renderInput() string {
 	content += inputContent
 	usedLines += max(inputLines+2, 4) // Input field + border
 
-	// Mode indicator
+	// Mode indicator with current model information
 	modeText := fmt.Sprintf("Mode: %s", p.mode)
+	if p.currentProvider != "" && p.currentModel != "" {
+		modeText += fmt.Sprintf(" | Model: %s/%s", p.currentProvider, p.currentModel)
+	}
 	if len(p.history) > 0 {
 		modeText += fmt.Sprintf(" | History: %d items", len(p.history))
 	}
+	log.Printf("[INPUT] Rendering mode text: '%s' (Provider='%s', Model='%s')", modeText, p.currentProvider, p.currentModel)
 
 	modeContent := styles.NewStyle().
 		Foreground(t.TextMuted()).
