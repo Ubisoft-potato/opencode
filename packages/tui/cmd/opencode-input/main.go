@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -289,6 +290,23 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("[INPUT] Clipboard paste received: %q", text)
 		return p.insertCharacter(text)
 
+	case ClipboardReadMsg:
+		if msg.Error != nil {
+			log.Printf("[INPUT] Clipboard read error: %v", msg.Error)
+			return p, nil
+		}
+
+		log.Printf("[INPUT] Clipboard content received: %q (length: %d)", msg.Content, len(msg.Content))
+
+		// Insert clipboard content at cursor position
+		if p.cursorPosition <= len(p.buffer) {
+			p.buffer = p.buffer[:p.cursorPosition] + msg.Content + p.buffer[p.cursorPosition:]
+			p.cursorPosition += len(msg.Content)
+		}
+
+		// Sync the updated state
+		return p, p.syncInputState()
+
 	default:
 		return p, nil
 	}
@@ -445,7 +463,8 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+v", "cmd+v":
 		// Handle paste - request clipboard content (both Ctrl+V and Cmd+V for Mac)
 		log.Printf("[INPUT] Paste key detected: %q", msg.String())
-		return p, tea.ReadClipboard
+		log.Printf("[INPUT] Attempting to read clipboard...")
+		return p, p.readClipboard()
 
 	case "ctrl+t":
 		// Cycle through comfortable themes
@@ -1621,6 +1640,36 @@ type SessionSyncMsg struct {
 
 type SessionUpdatedMsg struct {
 	Session types.SessionInfo
+}
+
+type ClipboardReadMsg struct {
+	Content string
+	Error   error
+}
+
+func (p *InputPanel) readClipboard() tea.Cmd {
+	return func() tea.Msg {
+		log.Printf("[INPUT] Attempting to read clipboard using pbpaste...")
+
+		cmd := exec.Command("pbpaste")
+		output, err := cmd.Output()
+
+		if err != nil {
+			log.Printf("[INPUT] Failed to read clipboard: %v", err)
+			return ClipboardReadMsg{
+				Content: "",
+				Error:   err,
+			}
+		}
+
+		content := string(output)
+		log.Printf("[INPUT] Clipboard content read successfully: %q (length: %d)", content, len(content))
+
+		return ClipboardReadMsg{
+			Content: content,
+			Error:   nil,
+		}
+	}
 }
 
 // Utility functions
