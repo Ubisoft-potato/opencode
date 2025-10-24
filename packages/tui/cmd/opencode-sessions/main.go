@@ -22,19 +22,21 @@ import (
 
 // SessionsPanel manages the sessions list panel
 type SessionsPanel struct {
-	client           *opencode.Client
-	ipcClient        *ipc.SocketClient
-	sessions         []types.SessionInfo
-	currentIndex     int
-	currentSessionID string
-	width            int
-	height           int
-	ctx              context.Context
-	cancel           context.CancelFunc
-	version          int64 // Store the state version directly in the model
-	eventsChan       chan types.StateEvent
-	program          *tea.Program // Reference to the program for triggering updates
-	scrollOffset     int          // Track scroll position for viewport
+	client            *opencode.Client
+	ipcClient         *ipc.SocketClient
+	sessions          []types.SessionInfo
+	currentIndex      int
+	currentSessionID  string
+	width             int
+	height            int
+	ctx               context.Context
+	cancel            context.CancelFunc
+	version           int64 // Store the state version directly in the model
+	eventsChan        chan types.StateEvent
+	program           *tea.Program // Reference to the program for triggering updates
+	scrollOffset      int          // Track scroll position for viewport
+	lastError         string       // Store last error message for display
+	isCreatingSession bool         // Track session creation in progress
 }
 
 // NewSessionsPanel creates a new sessions panel
@@ -132,7 +134,10 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return p, nil
 
 	case ErrorMsg:
-		log.Printf("Sessions panel error: %v", msg.Error)
+		errorText := fmt.Sprintf("%v", msg.Error)
+		log.Printf("Sessions panel error: %s", errorText)
+		p.lastError = errorText
+		p.isCreatingSession = false
 		return p, nil
 
 	case SessionSyncMsg:
@@ -151,8 +156,24 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SessionCreatedMsg:
 		log.Printf("Session created: %s", msg.Session.ID)
-		// UI will be refreshed automatically since the session was already added
-		// to p.sessions in handleSessionAdded via the SessionEventMsg flow
+		// Add the new session to the local list if not already present
+		found := false
+		for _, s := range p.sessions {
+			if s.ID == msg.Session.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			p.sessions = append(p.sessions, msg.Session)
+			// Select the newly created session
+			p.currentIndex = len(p.sessions) - 1
+			p.currentSessionID = msg.Session.ID
+			p.updateScrollOffset()
+			log.Printf("Added new session to list at index %d", p.currentIndex)
+		}
+		p.isCreatingSession = false
+		p.lastError = "" // Clear any previous errors
 		return p, nil
 
 	case SessionSelectedMsg:
@@ -212,6 +233,8 @@ func (p *SessionsPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return p, p.selectCurrentSession()
 
 	case "n":
+		p.isCreatingSession = true
+		p.lastError = ""
 		return p, p.createNewSession()
 
 	case "d":
@@ -265,11 +288,15 @@ func (p *SessionsPanel) selectCurrentSession() tea.Cmd {
 // createNewSession creates a new session
 func (p *SessionsPanel) createNewSession() tea.Cmd {
 	return func() tea.Msg {
+		log.Printf("[SESSIONS] Starting new session creation...")
+
 		// Create session via API
 		session, err := p.client.Session.New(p.ctx, opencode.SessionNewParams{})
 		if err != nil {
+			log.Printf("[SESSIONS] Failed to create session via API: %v", err)
 			return ErrorMsg{Error: fmt.Errorf("failed to create session: %w", err)}
 		}
+		log.Printf("[SESSIONS] Successfully created session via API: %s (title: %s)", session.ID, session.Title)
 
 		// Convert to state format
 		sessionInfo := types.SessionInfo{
@@ -282,9 +309,11 @@ func (p *SessionsPanel) createNewSession() tea.Cmd {
 		}
 
 		// Send update
+		versionToSend := p.expectedVersion()
+		log.Printf("[SESSIONS] Sending SessionAdded update to IPC (version: %d)", versionToSend)
 		update := types.StateUpdate{
 			Type:            types.SessionAdded,
-			ExpectedVersion: p.expectedVersion(),
+			ExpectedVersion: versionToSend,
 			Payload:         types.SessionAddPayload{Session: sessionInfo},
 			SourcePanel:     "sessions-panel",
 			Timestamp:       time.Now(),
@@ -292,9 +321,11 @@ func (p *SessionsPanel) createNewSession() tea.Cmd {
 
 		newVersion, err := p.ipcClient.SendStateUpdateAndWait(update)
 		if err != nil {
-			return ErrorMsg{Error: err}
+			log.Printf("[SESSIONS] Failed to send SessionAdded update: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to sync session state: %w", err)}
 		}
 		p.version = newVersion
+		log.Printf("[SESSIONS] SessionAdded update successful, new version: %d", newVersion)
 
 		return SessionCreatedMsg{Session: sessionInfo}
 	}
@@ -706,6 +737,19 @@ func (p *SessionsPanel) renderSessionsList() string {
 
 		sessionLine := fmt.Sprintf("%s%s%s (%d msgs)", prefix, indicator, title, session.MessageCount)
 		content += style.Render(sessionLine) + "\n"
+	}
+
+	// Add status line (loading or error)
+	if p.isCreatingSession {
+		content += "\n" + styles.NewStyle().
+			Foreground(t.Primary()).
+			Bold(true).
+			Render("Creating new session...")
+	} else if p.lastError != "" {
+		content += "\n" + styles.NewStyle().
+			Foreground(t.Error()).
+			Bold(true).
+			Render("Error: "+p.lastError)
 	}
 
 	// Add scroll indicator if there are more items
