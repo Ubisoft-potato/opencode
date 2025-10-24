@@ -1094,6 +1094,12 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 		}
 	}
 
+	// Skip rendering empty assistant messages that are still pending
+	// This prevents showing "🤖 Assistant: ⏳" with no actual content
+	if message.Type == "assistant" && message.Status == "pending" && strings.TrimSpace(content) == "" {
+		return ""
+	}
+
 	// Add status indicator for pending messages
 	if message.Status == "pending" {
 		if p.markdownMode {
@@ -1210,6 +1216,12 @@ func (lr *LineBasedRenderer) generateContentHash(message types.MessageInfo, widt
 // renderMessageToLines converts a message to a list of rendered lines
 func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, width int, mode string, showTimestamps bool) []RenderedLine {
 	log.Printf("[RENDERER] Rendering message %s (type=%s, mode=%s, width=%d)", message.ID, message.Type, mode, width)
+
+	// Skip rendering empty assistant messages that are still pending
+	// This prevents showing "🤖 Assistant: ⏳" with no actual content
+	if message.Type == "assistant" && message.Status == "pending" && strings.TrimSpace(message.Content) == "" {
+		return []RenderedLine{}
+	}
 
 	contentHash := lr.generateContentHash(message, width, mode, showTimestamps)
 
