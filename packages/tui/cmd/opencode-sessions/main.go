@@ -34,6 +34,7 @@ type SessionsPanel struct {
 	version          int64 // Store the state version directly in the model
 	eventsChan       chan types.StateEvent
 	program          *tea.Program // Reference to the program for triggering updates
+	scrollOffset     int          // Track scroll position for viewport
 }
 
 // NewSessionsPanel creates a new sessions panel
@@ -196,12 +197,14 @@ func (p *SessionsPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if p.currentIndex > 0 {
 			p.currentIndex--
+			p.updateScrollOffset()
 			return p, p.selectCurrentSession()
 		}
 
 	case "down", "j":
 		if p.currentIndex < len(p.sessions)-1 {
 			p.currentIndex++
+			p.updateScrollOffset()
 			return p, p.selectCurrentSession()
 		}
 
@@ -578,13 +581,61 @@ func (p *SessionsPanel) updateCurrentIndex() {
 	for i, session := range p.sessions {
 		if session.ID == p.currentSessionID {
 			p.currentIndex = i
+			p.updateScrollOffset()
 			return
 		}
 	}
 	// If current session not found, select first session
 	if len(p.sessions) > 0 {
 		p.currentIndex = 0
+		p.scrollOffset = 0
 	}
+}
+
+// updateScrollOffset adjusts scroll offset to keep current selection visible
+func (p *SessionsPanel) updateScrollOffset() {
+	visibleLines := p.height - 4
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	// If current index is above the viewport, scroll up
+	if p.currentIndex < p.scrollOffset {
+		p.scrollOffset = p.currentIndex
+	}
+
+	// If current index is below the viewport, scroll down
+	if p.currentIndex >= p.scrollOffset+visibleLines {
+		p.scrollOffset = p.currentIndex - visibleLines + 1
+	}
+
+	// Ensure scroll offset is within bounds
+	if p.scrollOffset < 0 {
+		p.scrollOffset = 0
+	}
+	maxScroll := len(p.sessions) - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if p.scrollOffset > maxScroll {
+		p.scrollOffset = maxScroll
+	}
+}
+
+// calculateViewport returns the start and end indices for visible sessions
+func (p *SessionsPanel) calculateViewport(visibleLines int) (startIdx, endIdx int) {
+	if len(p.sessions) == 0 {
+		return 0, 0
+	}
+
+	startIdx = p.scrollOffset
+	endIdx = startIdx + visibleLines
+
+	if endIdx > len(p.sessions) {
+		endIdx = len(p.sessions)
+	}
+
+	return startIdx, endIdx
 }
 
 // renderEmptyState renders the empty sessions state
@@ -609,7 +660,18 @@ func (p *SessionsPanel) renderSessionsList() string {
 		Bold(true).
 		Render("Sessions") + "\n\n"
 
-	for i, session := range p.sessions {
+	// Calculate visible area: total height - header (2 lines) - help text (2 lines) - margins
+	visibleLines := p.height - 4
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	// Calculate viewport
+	startIdx, endIdx := p.calculateViewport(visibleLines)
+
+	// Render only visible sessions
+	for i := startIdx; i < endIdx; i++ {
+		session := p.sessions[i]
 		isSelected := i == p.currentIndex
 		isCurrent := session.ID == p.currentSessionID
 
@@ -617,7 +679,6 @@ func (p *SessionsPanel) renderSessionsList() string {
 		var prefix string
 
 		if isSelected {
-			// 样式选项2: 反色高亮（类似传统终端选择）
 			style = styles.NewStyle().
 				Background(t.Primary()).
 				Foreground(t.Background()).
@@ -625,7 +686,6 @@ func (p *SessionsPanel) renderSessionsList() string {
 				Padding(0, 1)
 			prefix = ""
 		} else {
-			// 未选中项目使用普通样式
 			style = styles.NewStyle().
 				Foreground(t.TextMuted()).
 				Padding(0, 1)
@@ -648,10 +708,16 @@ func (p *SessionsPanel) renderSessionsList() string {
 		content += style.Render(sessionLine) + "\n"
 	}
 
+	// Add scroll indicator if there are more items
+	scrollInfo := ""
+	if len(p.sessions) > visibleLines {
+		scrollInfo = fmt.Sprintf(" [%d-%d/%d]", startIdx+1, endIdx, len(p.sessions))
+	}
+
 	// Add help text
 	content += "\n" + styles.NewStyle().
 		Foreground(t.TextMuted()).
-		Render("↑/k up • ↓/j down • enter select • n new • d delete • r refresh • q quit")
+		Render("↑/k up • ↓/j down • enter select • n new • d delete • r refresh • q quit"+scrollInfo)
 
 	return content
 }
