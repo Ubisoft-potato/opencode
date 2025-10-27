@@ -31,6 +31,72 @@ type ModelInfo struct {
 	Name     string
 }
 
+// updateAgentScrollOffset updates the scroll offset for agent list to keep selected item visible
+func (p *InputPanel) updateAgentScrollOffset() {
+	dialogHeight := min(p.height-4, 20)
+	maxAgents := dialogHeight - 8 // Reserve space for header, search, etc.
+	if p.agentSearchQuery != "" {
+		maxAgents = dialogHeight - 5 // Less space needed when no recent section
+	}
+
+	// Ensure selected item is visible
+	if p.agentSelectedIdx < p.agentScrollOffset {
+		p.agentScrollOffset = p.agentSelectedIdx
+	} else if p.agentSelectedIdx >= p.agentScrollOffset+maxAgents {
+		p.agentScrollOffset = p.agentSelectedIdx - maxAgents + 1
+	}
+
+	// Ensure scroll offset doesn't go negative
+	if p.agentScrollOffset < 0 {
+		p.agentScrollOffset = 0
+	}
+
+	// Ensure scroll offset doesn't exceed available agents
+	maxOffset := len(p.availableAgents) - maxAgents
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if p.agentScrollOffset > maxOffset {
+		p.agentScrollOffset = maxOffset
+	}
+}
+
+// filterAgents filters available agents based on search query
+func (p *InputPanel) filterAgents() {
+	// Reset to all agents if no search query
+	if p.agentSearchQuery == "" {
+		p.availableAgents = []AgentInfo{
+			{Name: "docs", Description: "Documentation assistant"},
+			{Name: "git-committer", Description: "Git commit message generator"},
+		}
+	} else {
+		// Simple filtering based on name and description
+		allAgents := []AgentInfo{
+			{Name: "docs", Description: "Documentation assistant"},
+			{Name: "git-committer", Description: "Git commit message generator"},
+		}
+
+		p.availableAgents = []AgentInfo{}
+		query := strings.ToLower(p.agentSearchQuery)
+		for _, agent := range allAgents {
+			if strings.Contains(strings.ToLower(agent.Name), query) ||
+				strings.Contains(strings.ToLower(agent.Description), query) {
+				p.availableAgents = append(p.availableAgents, agent)
+			}
+		}
+	}
+
+	// Reset selection if out of bounds
+	if p.agentSelectedIdx >= len(p.availableAgents) {
+		p.agentSelectedIdx = 0
+	}
+}
+
+type AgentInfo struct {
+	Name        string
+	Description string
+}
+
 type InputPanel struct {
 	client              *opencode.Client
 	ipcClient           *ipc.SocketClient
@@ -38,7 +104,7 @@ type InputPanel struct {
 	cursorPosition      int
 	selectionStart      int
 	selectionEnd        int
-	mode                string // "normal", "command", "multiline", "model_select"
+	mode                string // "normal", "command", "multiline", "model_select", "agent_select"
 	history             []string
 	historyIndex        int
 	currentSessionID    string
@@ -66,6 +132,12 @@ type InputPanel struct {
 	modelSelectedIdx  int         // Currently selected model index
 	modelScrollOffset int         // Current scroll offset in model list
 	availableModels   []ModelInfo // Available models for selection
+	// Agent selection state
+	showAgentDialog   bool        // Whether agent selection dialog is visible
+	agentSearchQuery  string      // Current search query in agent dialog
+	agentSelectedIdx  int         // Currently selected agent index
+	agentScrollOffset int         // Current scroll offset in agent list
+	availableAgents   []AgentInfo // Available agents for selection
 	// Current model information
 	currentProvider string // Current selected provider
 	currentModel    string // Current selected model
@@ -404,6 +476,9 @@ func (p *InputPanel) View() string {
 	if p.showModelDialog {
 		return p.renderModelDialog()
 	}
+	if p.showAgentDialog {
+		return p.renderAgentDialog()
+	}
 	return p.renderInput()
 }
 
@@ -415,6 +490,11 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle model selection dialog keys
 	if p.showModelDialog && p.mode == "model_select" {
 		return p.handleModelDialogKeys(msg)
+	}
+
+	// Handle agent selection dialog keys
+	if p.showAgentDialog && p.mode == "agent_select" {
+		return p.handleAgentDialogKeys(msg)
 	}
 
 	switch msg.String() {
@@ -582,6 +662,112 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if len(runes) > 1 {
 			log.Printf("[INPUT] Multi-character key sequence ignored: %q", keyStr)
 		}
+	}
+
+	return p, nil
+}
+
+// handleAgentDialogKeys handles keyboard input when agent selection dialog is active
+func (p *InputPanel) handleAgentDialogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	keyStr := msg.String()
+
+	switch keyStr {
+	case "escape", "esc", "ctrl+c":
+		// Close agent dialog
+		p.showAgentDialog = false
+		p.mode = "normal"
+		return p, nil
+
+	case "enter":
+		// Select current agent
+		if p.agentSelectedIdx < len(p.availableAgents) {
+			selectedAgent := p.availableAgents[p.agentSelectedIdx]
+			p.showAgentDialog = false
+			p.mode = "normal"
+			return p, p.changeAgent(selectedAgent.Name)
+		}
+		return p, nil
+
+	case "up":
+		// Move selection up
+		if p.agentSelectedIdx > 0 {
+			p.agentSelectedIdx--
+			p.updateAgentScrollOffset()
+		}
+		return p, nil
+
+	case "down":
+		// Move selection down
+		if p.agentSelectedIdx < len(p.availableAgents)-1 {
+			p.agentSelectedIdx++
+			p.updateAgentScrollOffset()
+		}
+		return p, nil
+
+	case "page_up", "ctrl+u":
+		// Page up in agent list
+		dialogHeight := min(p.height-4, 20)
+		maxAgents := dialogHeight - 8
+		if p.agentSearchQuery != "" {
+			maxAgents = dialogHeight - 5
+		}
+
+		p.agentSelectedIdx = max(0, p.agentSelectedIdx-maxAgents)
+		p.updateAgentScrollOffset()
+		return p, nil
+
+	case "page_down", "ctrl+d":
+		// Page down in agent list
+		dialogHeight := min(p.height-4, 20)
+		maxAgents := dialogHeight - 8
+		if p.agentSearchQuery != "" {
+			maxAgents = dialogHeight - 5
+		}
+
+		p.agentSelectedIdx = min(len(p.availableAgents)-1, p.agentSelectedIdx+maxAgents)
+		p.updateAgentScrollOffset()
+		return p, nil
+
+	case "home", "ctrl+a":
+		// Go to first agent
+		p.agentSelectedIdx = 0
+		p.agentScrollOffset = 0
+		return p, nil
+
+	case "end", "ctrl+e":
+		// Go to last agent
+		p.agentSelectedIdx = len(p.availableAgents) - 1
+		p.updateAgentScrollOffset()
+		return p, nil
+
+	default:
+		// Handle search input
+		if len(msg.String()) == 1 {
+			p.agentSearchQuery += msg.String()
+			p.filterAgents()
+			p.agentSelectedIdx = 0
+			p.agentScrollOffset = 0
+			return p, nil
+		}
+
+		// Handle backspace in search
+		if msg.String() == "backspace" && len(p.agentSearchQuery) > 0 {
+			p.agentSearchQuery = p.agentSearchQuery[:len(p.agentSearchQuery)-1]
+			p.filterAgents()
+			p.agentSelectedIdx = 0
+			p.agentScrollOffset = 0
+			return p, nil
+		}
+
+		// Special handling for ESC key variants that might not match the case above
+		if strings.Contains(strings.ToLower(keyStr), "esc") {
+			log.Printf("[AGENT_DIALOG] ESC variant detected - closing dialog")
+			p.showAgentDialog = false
+			p.mode = "normal"
+			log.Printf("[AGENT_DIALOG] After ESC variant - showAgentDialog: %v, mode: %s", p.showAgentDialog, p.mode)
+			return p, nil
+		}
+
 	}
 
 	return p, nil
@@ -776,6 +962,23 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 			{Provider: "OpenCode Zen", Model: "llama-3-70b", Name: "Llama 3 70B"},
 			{Provider: "OpenCode Zen", Model: "mistral-large", Name: "Mistral Large"},
 			{Provider: "OpenCode Zen", Model: "codestral", Name: "Codestral"},
+		}
+	case "/agents":
+		// 显示代理选择对话框
+		p.showAgentDialog = true
+		p.mode = "agent_select"
+		p.agentSearchQuery = ""
+		p.agentSelectedIdx = 0
+		// 初始化可用代理列表（这里使用示例数据，实际应该从API获取）
+		p.availableAgents = []AgentInfo{
+			{Name: "Code Assistant", Description: "General purpose coding assistant"},
+			{Name: "Debug Expert", Description: "Specialized in debugging and troubleshooting"},
+			{Name: "Architecture Advisor", Description: "Helps with system design and architecture"},
+			{Name: "Performance Optimizer", Description: "Focuses on code optimization and performance"},
+			{Name: "Security Auditor", Description: "Reviews code for security vulnerabilities"},
+			{Name: "Test Generator", Description: "Creates comprehensive test suites"},
+			{Name: "Documentation Writer", Description: "Generates clear and comprehensive documentation"},
+			{Name: "Code Reviewer", Description: "Provides detailed code review feedback"},
 		}
 	case "/clear":
 		cmdToExecute = p.clearMessages()
@@ -1057,6 +1260,25 @@ func (p *InputPanel) handleUIActionTriggered(event types.StateEvent) error {
 					// Trigger UI update
 					if p.program != nil {
 						p.program.Send(InfoMsg{Message: "Model selection dialog opened"})
+					}
+				}
+
+				// Handle open_agents action by showing agent selection dialog
+				if action == "open_agents" {
+					p.showAgentDialog = true
+					p.mode = "agent_select"
+					p.agentSearchQuery = ""
+					p.agentSelectedIdx = 0
+					// Initialize with some mock agents for now
+					p.availableAgents = []AgentInfo{
+						{Name: "Code Assistant", Description: "General purpose coding assistant"},
+						{Name: "Debug Helper", Description: "Specialized in debugging and troubleshooting"},
+						{Name: "Documentation Writer", Description: "Helps with writing documentation"},
+					}
+
+					// Trigger UI update
+					if p.program != nil {
+						p.program.Send(InfoMsg{Message: "Agent selection dialog opened"})
 					}
 				}
 
@@ -2059,6 +2281,168 @@ func (p *InputPanel) renderModelDialog() string {
 	// Add scroll position indicator in bottom right corner if there are many models
 	if totalModels > maxModels {
 		scrollInfo := fmt.Sprintf(" %d/%d ", p.modelSelectedIdx+1, totalModels)
+		bottomLine := result.String()
+		lines := strings.Split(bottomLine, "\n")
+		if len(lines) > 0 {
+			lastLine := lines[len(lines)-1]
+			if len(lastLine) >= len(scrollInfo)+1 {
+				// Replace part of bottom border with scroll info
+				newLastLine := lastLine[:len(lastLine)-len(scrollInfo)-1] + scrollInfo + "┘"
+				lines[len(lines)-1] = newLastLine
+				result.Reset()
+				result.WriteString(strings.Join(lines, "\n"))
+			}
+		}
+	}
+
+	return result.String()
+}
+
+func (p *InputPanel) renderAgentDialog() string {
+	var result strings.Builder
+
+	// Calculate dialog dimensions
+	dialogWidth := min(p.width-4, 60)   // Leave margin and max width
+	dialogHeight := min(p.height-4, 20) // Leave margin and max height
+
+	// Top border
+	result.WriteString("┌" + strings.Repeat("─", dialogWidth-2) + "┐\n")
+
+	// Title line with close hint
+	title := " Select Agent "
+	closeHint := " esc "
+	padding := dialogWidth - len(title) - len(closeHint) - 2
+	if padding < 0 {
+		padding = 0
+	}
+	result.WriteString("│" + title + strings.Repeat(" ", padding) + closeHint + "│\n")
+
+	// Separator
+	result.WriteString("├" + strings.Repeat("─", dialogWidth-2) + "┤\n")
+
+	// Search box
+	searchPrompt := " 🔍 Search agents..."
+	if p.agentSearchQuery != "" {
+		searchPrompt = " 🔍 " + p.agentSearchQuery
+	}
+	searchPadding := dialogWidth - len(searchPrompt) - 2
+	if searchPadding < 0 {
+		searchPadding = 0
+	}
+	result.WriteString("│" + searchPrompt + strings.Repeat(" ", searchPadding) + "│\n")
+
+	// Empty line
+	result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+
+	// Available agents section
+	agentsTitle := " Available Agents"
+	agentsPadding := dialogWidth - len(agentsTitle) - 2
+	if agentsPadding < 0 {
+		agentsPadding = 0
+	}
+	result.WriteString("│" + agentsTitle + strings.Repeat(" ", agentsPadding) + "│\n")
+
+	// Calculate available space for agents
+	maxAgents := dialogHeight - 7 // Reserve space for header, search, etc.
+	if p.agentSearchQuery != "" {
+		maxAgents = dialogHeight - 6 // Less space needed when no recent section
+	}
+
+	// Calculate scroll indicators
+	totalAgents := len(p.availableAgents)
+	showScrollUp := p.agentScrollOffset > 0
+	showScrollDown := p.agentScrollOffset+maxAgents < totalAgents
+
+	// Add scroll up indicator if needed
+	if showScrollUp {
+		scrollUpLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↑" + strings.Repeat(" ", (dialogWidth-3)/2)
+		if len(scrollUpLine) > dialogWidth-2 {
+			scrollUpLine = scrollUpLine[:dialogWidth-2]
+		}
+		scrollUpPadding := dialogWidth - len(scrollUpLine) - 2
+		if scrollUpPadding < 0 {
+			scrollUpPadding = 0
+		}
+		result.WriteString("│" + scrollUpLine + strings.Repeat(" ", scrollUpPadding) + "│\n")
+		maxAgents-- // Reduce available space for agents
+	}
+
+	// Render visible agents with scroll offset
+	visibleStart := p.agentScrollOffset
+	visibleEnd := min(visibleStart+maxAgents, totalAgents)
+
+	for i := visibleStart; i < visibleEnd; i++ {
+		agent := p.availableAgents[i]
+
+		prefix := "   "
+		if i == p.agentSelectedIdx {
+			prefix = " ▶ " // Selection indicator with proper spacing
+		}
+
+		agentLine := prefix + agent.Name + "  " + agent.Description
+		if len(agentLine) > dialogWidth-2 {
+			agentLine = agentLine[:dialogWidth-5] + "..."
+		}
+
+		agentPadding := dialogWidth - len(agentLine) - 2
+		if agentPadding < 0 {
+			agentPadding = 0
+		}
+		result.WriteString("│" + agentLine + strings.Repeat(" ", agentPadding) + "│\n")
+
+		// Add underline for selected agent on the next line
+		if i == p.agentSelectedIdx {
+			// Create underline for the agent name part only
+			nameLength := len(agent.Name)
+			prefixLength := 4                            // Length of " ▶ "
+			if nameLength > dialogWidth-prefixLength-6 { // Account for prefix, description and padding
+				nameLength = dialogWidth - prefixLength - 6
+			}
+			underline := strings.Repeat("─", nameLength)
+			underlineLine := strings.Repeat(" ", prefixLength) + underline
+			underlinePadding := dialogWidth - len(underlineLine) - 2
+			if underlinePadding < 0 {
+				underlinePadding = 0
+			}
+			result.WriteString("│" + underlineLine + strings.Repeat(" ", underlinePadding) + "│\n")
+		}
+	}
+
+	// Add scroll down indicator if needed
+	if showScrollDown {
+		scrollDownLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↓" + strings.Repeat(" ", (dialogWidth-3)/2)
+		if len(scrollDownLine) > dialogWidth-2 {
+			scrollDownLine = scrollDownLine[:dialogWidth-2]
+		}
+		scrollDownPadding := dialogWidth - len(scrollDownLine) - 2
+		if scrollDownPadding < 0 {
+			scrollDownPadding = 0
+		}
+		result.WriteString("│" + scrollDownLine + strings.Repeat(" ", scrollDownPadding) + "│\n")
+		maxAgents-- // Account for scroll indicator space
+	}
+
+	// Fill remaining space if needed
+	currentLines := 6 // header lines
+	if showScrollUp {
+		currentLines++
+	}
+	currentLines += (visibleEnd - visibleStart) // visible agents
+	if showScrollDown {
+		currentLines++
+	}
+
+	for currentLines < dialogHeight-1 {
+		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+		currentLines++
+	}
+
+	// Bottom border
+	result.WriteString("└" + strings.Repeat("─", dialogWidth-2) + "┘")
+
+	// Add scroll position indicator in bottom right corner if there are many agents
+	if totalAgents > maxAgents {
+		scrollInfo := fmt.Sprintf(" %d/%d ", p.agentSelectedIdx+1, totalAgents)
 		bottomLine := result.String()
 		lines := strings.Split(bottomLine, "\n")
 		if len(lines) > 0 {

@@ -1315,6 +1315,8 @@ func (orch *TmuxOrchestrator) handleAPIRequest(path string, body json.RawMessage
 		return orch.handleOpenThemesRequest(body)
 	case "/tui/open-help":
 		return orch.handleOpenHelpRequest(body)
+	case "/tui/open-agents":
+		return orch.handleOpenAgentsRequest(body)
 	default:
 		log.Printf("Unknown API request path: %s", path)
 		return map[string]interface{}{
@@ -1350,6 +1352,33 @@ func (orch *TmuxOrchestrator) handleOpenModelsRequest(body json.RawMessage) inte
 	}
 
 	log.Printf("Successfully triggered open models action")
+	return true
+}
+
+// handleOpenAgentsRequest handles the /tui/open-agents request
+func (orch *TmuxOrchestrator) handleOpenAgentsRequest(body json.RawMessage) interface{} {
+	log.Printf("Handling open agents request")
+
+	// Create a state update to trigger agent dialog opening
+	update := types.StateUpdate{
+		ID:              fmt.Sprintf("open_agents_%d", time.Now().UnixNano()),
+		Type:            types.UIActionTriggered,
+		ExpectedVersion: orch.syncManager.GetState().GetCurrentVersion(),
+		Payload: types.UIActionPayload{
+			Action: "open_agents",
+		},
+		SourcePanel: "tmux-orchestrator",
+		Timestamp:   time.Now(),
+	}
+
+	if err := orch.syncManager.UpdateWithVersionCheck(update); err != nil {
+		log.Printf("Failed to trigger open agents action: %v", err)
+		return map[string]interface{}{
+			"success": false,
+			"error":   "failed to trigger agent dialog",
+		}
+	}
+
 	return true
 }
 

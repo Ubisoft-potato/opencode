@@ -791,6 +791,9 @@ func (a Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "/tui/open-models":
 			modelDialog := dialog.NewModelDialog(a.app)
 			a.modal = modelDialog
+		case "/tui/open-agents":
+			agentDialog := dialog.NewAgentDialog(a.app)
+			a.modal = agentDialog
 		case "/tui/append-prompt":
 			var body struct {
 				Text string `json:"text"`
