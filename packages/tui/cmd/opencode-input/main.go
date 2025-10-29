@@ -138,9 +138,10 @@ type InputPanel struct {
 	agentScrollOffset int         // Current scroll offset in agent list
 	availableAgents   []AgentInfo // Available agents for selection
 	// Command completion dialog state
-	showCompletionDialog  bool     // Whether command completion dialog is visible
-	completionCommands    []string // Available commands for completion
-	completionSelectedIdx int      // Currently selected command index
+	showCompletionDialog   bool     // Whether command completion dialog is visible
+	completionCommands     []string // Available commands for completion
+	completionSelectedIdx  int      // Currently selected command index
+	completionScrollOffset int      // Current scroll offset in completion list
 	// Current model information
 	currentProvider string // Current selected provider
 	currentModel    string // Current selected model
@@ -699,6 +700,7 @@ func (p *InputPanel) handleCompletionDialogKeys(msg tea.KeyMsg) (tea.Model, tea.
 		// Move selection up
 		if p.completionSelectedIdx > 0 {
 			p.completionSelectedIdx--
+			p.updateCompletionScrollOffset()
 		}
 		return p, nil
 
@@ -706,6 +708,7 @@ func (p *InputPanel) handleCompletionDialogKeys(msg tea.KeyMsg) (tea.Model, tea.
 		// Move selection down
 		if p.completionSelectedIdx < len(p.completionCommands)-1 {
 			p.completionSelectedIdx++
+			p.updateCompletionScrollOffset()
 		}
 		return p, nil
 
@@ -856,9 +859,43 @@ func (p *InputPanel) handleEnter() (tea.Model, tea.Cmd) {
 	return p, p.sendMessage()
 }
 
+// updateCompletionScrollOffset updates the scroll offset to keep the selected item visible
+func (p *InputPanel) updateCompletionScrollOffset() {
+	if len(p.completionCommands) == 0 {
+		return
+	}
+
+	// Calculate dialog dimensions
+	dialogHeight := min(p.height-4, 15) // Smaller height for completion dialog
+	maxCommands := dialogHeight - 4     // Reserve space for header and borders
+
+	// If all commands fit, no scrolling needed
+	if len(p.completionCommands) <= maxCommands {
+		p.completionScrollOffset = 0
+		return
+	}
+
+	// Ensure selected item is visible
+	if p.completionSelectedIdx < p.completionScrollOffset {
+		// Selected item is above visible area, scroll up
+		p.completionScrollOffset = p.completionSelectedIdx
+	} else if p.completionSelectedIdx >= p.completionScrollOffset+maxCommands {
+		// Selected item is below visible area, scroll down
+		p.completionScrollOffset = p.completionSelectedIdx - maxCommands + 1
+	}
+
+	// Ensure scroll offset is within bounds
+	maxScrollOffset := len(p.completionCommands) - maxCommands
+	if p.completionScrollOffset > maxScrollOffset {
+		p.completionScrollOffset = maxScrollOffset
+	}
+	if p.completionScrollOffset < 0 {
+		p.completionScrollOffset = 0
+	}
+}
+
 // handleTab processes tab completion
 func (p *InputPanel) handleTab() (tea.Model, tea.Cmd) {
-	// Simple tab completion for commands
 	if strings.HasPrefix(p.buffer, "/") {
 		commands := []string{"/help", "/clear", "/session", "/new", "/delete", "/theme", "/model", "/agent"}
 
@@ -2563,11 +2600,32 @@ func (p *InputPanel) renderCompletionDialog() string {
 	// Available commands section
 	maxCommands := dialogHeight - 4 // Reserve space for header and borders
 
-	// Show available commands
-	for i, command := range p.completionCommands {
-		if i >= maxCommands {
+	// Calculate visible range
+	totalCommands := len(p.completionCommands)
+	visibleStart := p.completionScrollOffset
+	visibleEnd := min(visibleStart+maxCommands, totalCommands)
+
+	// Show scroll up indicator if needed
+	if visibleStart > 0 {
+		scrollUpLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↑" + strings.Repeat(" ", (dialogWidth-3)/2)
+		if len(scrollUpLine) > dialogWidth-2 {
+			scrollUpLine = scrollUpLine[:dialogWidth-2]
+		}
+		scrollUpPadding := dialogWidth - len(scrollUpLine) - 2
+		if scrollUpPadding < 0 {
+			scrollUpPadding = 0
+		}
+		result.WriteString("│" + scrollUpLine + strings.Repeat(" ", scrollUpPadding) + "│\n")
+		maxCommands-- // Account for scroll indicator space
+	}
+
+	// Show visible commands
+	for i := visibleStart; i < visibleEnd; i++ {
+		if i >= len(p.completionCommands) {
 			break
 		}
+
+		command := p.completionCommands[i]
 
 		// Highlight selected command
 		prefix := " "
@@ -2583,13 +2641,54 @@ func (p *InputPanel) renderCompletionDialog() string {
 		result.WriteString("│" + commandLine + strings.Repeat(" ", commandPadding) + "│\n")
 	}
 
-	// Fill remaining space
-	for i := len(p.completionCommands); i < maxCommands; i++ {
+	// Show scroll down indicator if needed
+	if visibleEnd < totalCommands {
+		scrollDownLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↓" + strings.Repeat(" ", (dialogWidth-3)/2)
+		if len(scrollDownLine) > dialogWidth-2 {
+			scrollDownLine = scrollDownLine[:dialogWidth-2]
+		}
+		scrollDownPadding := dialogWidth - len(scrollDownLine) - 2
+		if scrollDownPadding < 0 {
+			scrollDownPadding = 0
+		}
+		result.WriteString("│" + scrollDownLine + strings.Repeat(" ", scrollDownPadding) + "│\n")
+		maxCommands-- // Account for scroll indicator space
+	}
+
+	// Fill remaining space if needed
+	currentLines := 3 // header lines
+	if visibleStart > 0 {
+		currentLines++ // scroll up indicator
+	}
+	currentLines += (visibleEnd - visibleStart) // visible commands
+	if visibleEnd < totalCommands {
+		currentLines++ // scroll down indicator
+	}
+
+	for currentLines < dialogHeight-1 {
 		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+		currentLines++
 	}
 
 	// Bottom border
 	result.WriteString("└" + strings.Repeat("─", dialogWidth-2) + "┘")
+
+	// Add scroll position indicator in bottom right corner if there are many commands
+	if totalCommands > maxCommands {
+		scrollInfo := fmt.Sprintf(" %d/%d ", p.completionSelectedIdx+1, totalCommands)
+		bottomLine := result.String()
+		lines := strings.Split(bottomLine, "\n")
+		if len(lines) > 0 {
+			lastLine := lines[len(lines)-1]
+			if len(lastLine) >= len(scrollInfo)+1 {
+				// Replace part of bottom border with scroll info
+				newLastLine := lastLine[:len(lastLine)-len(scrollInfo)-1] + scrollInfo + "┘"
+				lines[len(lines)-1] = newLastLine
+				result.Reset()
+				result.WriteString(strings.Join(lines, "\n"))
+			}
+		}
+	}
 
 	return result.String()
 }
