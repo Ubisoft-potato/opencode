@@ -17,7 +17,6 @@ import (
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
 	"github.com/sst/opencode/internal/ipc"
-	"github.com/sst/opencode/internal/layout"
 	"github.com/sst/opencode/internal/state"
 	"github.com/sst/opencode/internal/styles"
 	"github.com/sst/opencode/internal/theme"
@@ -138,18 +137,19 @@ type InputPanel struct {
 	agentSelectedIdx  int         // Currently selected agent index
 	agentScrollOffset int         // Current scroll offset in agent list
 	availableAgents   []AgentInfo // Available agents for selection
+	// Command completion dialog state
+	showCompletionDialog  bool     // Whether command completion dialog is visible
+	completionCommands    []string // Available commands for completion
+	completionSelectedIdx int      // Currently selected command index
 	// Current model information
 	currentProvider string // Current selected provider
 	currentModel    string // Current selected model
-	// Command completion fields
-	showCompletionDialog  bool     // Whether command completion dialog is visible
-	completionOptions     []string // Available completion options
-	completionSelectedIdx int      // Currently selected completion index
-	completionPrefix      string   // The prefix being completed
 }
 
 // NewInputPanel creates a new input panel
-func NewInputPanel(httpClient *opencode.Client, comfortableThemes []string, currentTheme string, ctx context.Context, cancel context.CancelFunc) *InputPanel {
+func NewInputPanel(httpClient *opencode.Client, socketPath string, comfortableThemes []string, currentTheme string) *InputPanel {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	currentIndex := 0
 	for i, themeName := range comfortableThemes {
 		if themeName == currentTheme {
@@ -160,7 +160,7 @@ func NewInputPanel(httpClient *opencode.Client, comfortableThemes []string, curr
 
 	panel := &InputPanel{
 		client:            httpClient,
-		ipcClient:         ipc.NewSocketClient(os.Getenv("OPENCODE_SOCKET"), "input-panel", "input"),
+		ipcClient:         ipc.NewSocketClient(socketPath, "input-panel", "input"),
 		buffer:            "",
 		cursorPosition:    0,
 		selectionStart:    0,
@@ -191,7 +191,7 @@ func NewInputPanel(httpClient *opencode.Client, comfortableThemes []string, curr
 	return panel
 }
 
-// Init initializes the input panel and returns initial commands
+// Init initializes the InputPanel and returns initial commands
 func (p *InputPanel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -478,16 +478,7 @@ func (p *InputPanel) View() string {
 		return p.renderAgentDialog()
 	}
 	if p.showCompletionDialog {
-		dialogContent := p.renderCompletionDialog()
-		if dialogContent != "" {
-			// Calculate position (center over input area)
-			dialogWidth := 40
-			dialogHeight := strings.Count(dialogContent, "\n") + 2
-			x := (p.width - dialogWidth) / 2
-			y := (p.height - dialogHeight) / 2
-
-			return layout.PlaceOverlay(x, y, dialogContent, p.renderInput())
-		}
+		return p.renderCompletionDialog()
 	}
 	return p.renderInput()
 }
@@ -496,6 +487,11 @@ func (p *InputPanel) View() string {
 func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Log all keyboard input for debugging
 	log.Printf("[INPUT] Key pressed: %q", msg.String())
+
+	// Handle command completion dialog keys first
+	if p.showCompletionDialog {
+		return p.handleCompletionDialogKeys(msg)
+	}
 
 	// Handle model selection dialog keys
 	if p.showModelDialog && p.mode == "model_select" {
@@ -521,18 +517,6 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return p, tea.Quit
 
 	case "enter":
-		// If completion dialog is visible, select current option
-		if p.showCompletionDialog {
-			selectedCmd := p.completionOptions[p.completionSelectedIdx]
-			p.buffer = selectedCmd + " "
-			p.cursorPosition = len(p.buffer)
-			p.showCompletionDialog = false
-			p.completionOptions = nil
-			p.completionSelectedIdx = 0
-			p.completionPrefix = ""
-			log.Printf("[INPUT] Selected completion: %s", selectedCmd)
-			return p, p.syncInputState()
-		}
 		return p.handleEnter()
 
 	case "ctrl+enter":
@@ -552,15 +536,6 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return p.handleShiftTab()
 
 	case "up":
-		// If completion dialog is visible, navigate up
-		if p.showCompletionDialog {
-			if p.completionSelectedIdx > 0 {
-				p.completionSelectedIdx--
-			} else {
-				p.completionSelectedIdx = len(p.completionOptions) - 1
-			}
-			return p, nil
-		}
 		// If in help scroll mode, scroll up in help content
 		if p.helpScrollMode && p.showHelp {
 			return p.handleHelpScrollUp()
@@ -568,32 +543,11 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return p.handleArrowUp()
 
 	case "down":
-		// If completion dialog is visible, navigate down
-		if p.showCompletionDialog {
-			if p.completionSelectedIdx < len(p.completionOptions)-1 {
-				p.completionSelectedIdx++
-			} else {
-				p.completionSelectedIdx = 0
-			}
-			return p, nil
-		}
 		// If in help scroll mode, scroll down in help content
 		if p.helpScrollMode && p.showHelp {
 			return p.handleHelpScrollDown()
 		}
 		return p.handleArrowDown()
-
-	case "escape":
-		// Hide completion dialog if visible
-		if p.showCompletionDialog {
-			p.showCompletionDialog = false
-			p.completionOptions = nil
-			p.completionSelectedIdx = 0
-			p.completionPrefix = ""
-			return p, nil
-		}
-		// Default escape behavior
-		return p, nil
 
 	case "left":
 		return p.handleArrowLeft()
@@ -717,6 +671,62 @@ func (p *InputPanel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return p, nil
+}
+
+// handleCompletionDialogKeys handles keyboard input when command completion dialog is active
+func (p *InputPanel) handleCompletionDialogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	keyStr := msg.String()
+
+	switch keyStr {
+	case "escape", "esc", "ctrl+c":
+		// Close completion dialog
+		p.showCompletionDialog = false
+		return p, nil
+
+	case "enter":
+		// Select current command
+		if p.completionSelectedIdx < len(p.completionCommands) {
+			selectedCommand := p.completionCommands[p.completionSelectedIdx]
+			p.showCompletionDialog = false
+			// Replace the "/" with the selected command
+			p.buffer = "/" + selectedCommand
+			p.cursorPosition = len(p.buffer)
+			return p, p.syncInputState()
+		}
+		return p, nil
+
+	case "up":
+		// Move selection up
+		if p.completionSelectedIdx > 0 {
+			p.completionSelectedIdx--
+		}
+		return p, nil
+
+	case "down":
+		// Move selection down
+		if p.completionSelectedIdx < len(p.completionCommands)-1 {
+			p.completionSelectedIdx++
+		}
+		return p, nil
+
+	case "tab":
+		// Tab also selects the current command
+		if p.completionSelectedIdx < len(p.completionCommands) {
+			selectedCommand := p.completionCommands[p.completionSelectedIdx]
+			p.showCompletionDialog = false
+			// Replace the "/" with the selected command
+			p.buffer = "/" + selectedCommand
+			p.cursorPosition = len(p.buffer)
+			return p, p.syncInputState()
+		}
+		return p, nil
+
+	default:
+		// For other keys, close the dialog and handle normally
+		p.showCompletionDialog = false
+		// Re-handle the key press normally
+		return p.handleKeyPress(msg)
+	}
 }
 
 // handleAgentDialogKeys handles keyboard input when agent selection dialog is active
@@ -848,85 +858,17 @@ func (p *InputPanel) handleEnter() (tea.Model, tea.Cmd) {
 
 // handleTab processes tab completion
 func (p *InputPanel) handleTab() (tea.Model, tea.Cmd) {
-	// Enhanced tab completion for commands
+	// Simple tab completion for commands
 	if strings.HasPrefix(p.buffer, "/") {
-		commands := []string{
-			"/help", "/clear", "/new", "/session", "/delete", "/theme", "/model", "/agent",
-			"/models", "/agents", "/editor", "/export", "/sessions", "/resume", "/continue",
-			"/timeline", "/history", "/goto", "/share", "/unshare", "/compact", "/summarize",
-			"/details", "/thinking", "/themes", "/init", "/undo", "/redo", "/exit", "/quit", "/q",
-		}
+		commands := []string{"/help", "/clear", "/session", "/new", "/delete", "/theme", "/model", "/agent"}
 
-		// Enhanced matching: support both prefix and fuzzy matching
-		var exactMatches []string
-		var fuzzyMatches []string
-
-		// First, find exact prefix matches
 		for _, cmd := range commands {
-			if strings.HasPrefix(cmd, p.buffer) {
-				exactMatches = append(exactMatches, cmd)
-			}
-		}
-
-		// If no exact matches, try fuzzy matching
-		if len(exactMatches) == 0 {
-			for _, cmd := range commands {
-				if p.fuzzyMatch(p.buffer, cmd) {
-					fuzzyMatches = append(fuzzyMatches, cmd)
-				}
-			}
-		}
-
-		// Use exact matches if available, otherwise use fuzzy matches
-		matches := exactMatches
-		if len(matches) == 0 {
-			matches = fuzzyMatches
-		}
-
-		if len(matches) == 0 {
-			// No matches, default tab behavior
-			return p.insertCharacter("    ")
-		} else if len(matches) == 1 {
-			// Single match, complete it directly
-			p.buffer = matches[0] + " "
-			p.cursorPosition = len(p.buffer)
-			// Hide completion dialog if it was visible
-			if p.showCompletionDialog {
-				p.showCompletionDialog = false
-				p.completionOptions = nil
-				p.completionSelectedIdx = 0
-				p.completionPrefix = ""
-			}
-			return p, p.syncInputState()
-		} else {
-			// Multiple matches, show completion dialog
-			if !p.showCompletionDialog {
-				// First tab press - show completion dialog
-				p.showCompletionDialog = true
-				p.completionOptions = matches
-				p.completionSelectedIdx = 0
-				p.completionPrefix = p.buffer
-				log.Printf("[INPUT] Showing completion dialog with %d options", len(matches))
-				return p, nil
-			} else {
-				// Subsequent tab presses - cycle through options
-				p.completionSelectedIdx = (p.completionSelectedIdx + 1) % len(p.completionOptions)
-				// Update buffer to show current selection
-				selectedCmd := p.completionOptions[p.completionSelectedIdx]
-				p.buffer = selectedCmd + " "
+			if strings.HasPrefix(cmd, p.buffer) && len(cmd) > len(p.buffer) {
+				p.buffer = cmd + " "
 				p.cursorPosition = len(p.buffer)
-				log.Printf("[INPUT] Cycling to completion option: %s", selectedCmd)
 				return p, p.syncInputState()
 			}
 		}
-	}
-
-	// Hide completion dialog if visible and not completing commands
-	if p.showCompletionDialog {
-		p.showCompletionDialog = false
-		p.completionOptions = nil
-		p.completionSelectedIdx = 0
-		p.completionPrefix = ""
 	}
 
 	// Default tab behavior - insert spaces
@@ -935,15 +877,6 @@ func (p *InputPanel) handleTab() (tea.Model, tea.Cmd) {
 
 // handleShiftTab processes shift+tab
 func (p *InputPanel) handleShiftTab() (tea.Model, tea.Cmd) {
-	// Hide completion dialog if visible
-	if p.showCompletionDialog {
-		p.showCompletionDialog = false
-		p.completionOptions = nil
-		p.completionSelectedIdx = 0
-		p.completionPrefix = ""
-		return p, nil
-	}
-
 	// Remove indentation
 	if strings.HasPrefix(p.buffer[max(0, p.cursorPosition-4):p.cursorPosition], "    ") {
 		start := max(0, p.cursorPosition-4)
@@ -951,89 +884,6 @@ func (p *InputPanel) handleShiftTab() (tea.Model, tea.Cmd) {
 		p.cursorPosition = start
 		return p, p.syncInputState()
 	}
-	return p, nil
-}
-
-// fuzzyMatch performs fuzzy matching between input and command
-func (p *InputPanel) fuzzyMatch(input, command string) bool {
-	if len(input) <= 1 {
-		return false // Don't fuzzy match for very short inputs
-	}
-
-	input = strings.ToLower(input[1:])     // Remove the '/' prefix
-	command = strings.ToLower(command[1:]) // Remove the '/' prefix
-
-	// Simple fuzzy matching: check if all characters of input appear in order in command
-	inputIdx := 0
-	for i := 0; i < len(command) && inputIdx < len(input); i++ {
-		if command[i] == input[inputIdx] {
-			inputIdx++
-		}
-	}
-
-	return inputIdx == len(input)
-}
-
-// showCommandCompletion shows the command completion dialog
-func (p *InputPanel) showCommandCompletion() (tea.Model, tea.Cmd) {
-	commands := []string{
-		"/help", "/clear", "/new", "/session", "/delete", "/theme", "/model", "/agent",
-		"/models", "/agents", "/editor", "/export", "/sessions", "/resume", "/continue",
-		"/timeline", "/history", "/goto", "/share", "/unshare", "/compact", "/summarize",
-		"/details", "/thinking", "/themes", "/init", "/undo", "/redo", "/exit", "/quit", "/q",
-	}
-
-	// Find matching commands
-	var matches []string
-	input := strings.TrimSpace(p.buffer)
-
-	for _, cmd := range commands {
-		if strings.HasPrefix(cmd, input) || p.fuzzyMatch(input, cmd) {
-			matches = append(matches, cmd)
-		}
-	}
-
-	if len(matches) > 0 {
-		p.showCompletionDialog = true
-		p.completionOptions = matches
-		p.completionSelectedIdx = 0
-		p.completionPrefix = input
-	}
-
-	return p, nil
-}
-
-// updateCommandCompletion updates the command completion based on current input
-func (p *InputPanel) updateCommandCompletion() (tea.Model, tea.Cmd) {
-	commands := []string{
-		"/help", "/clear", "/new", "/session", "/delete", "/theme", "/model", "/agent",
-		"/models", "/agents", "/editor", "/export", "/sessions", "/resume", "/continue",
-		"/timeline", "/history", "/goto", "/share", "/unshare", "/compact", "/summarize",
-		"/details", "/thinking", "/themes", "/init", "/undo", "/redo", "/exit", "/quit", "/q",
-	}
-
-	// Find matching commands
-	var matches []string
-	input := strings.TrimSpace(p.buffer)
-
-	for _, cmd := range commands {
-		if strings.HasPrefix(cmd, input) || p.fuzzyMatch(input, cmd) {
-			matches = append(matches, cmd)
-		}
-	}
-
-	if len(matches) > 0 {
-		p.completionOptions = matches
-		p.completionSelectedIdx = 0
-		p.completionPrefix = input
-	} else {
-		// No matches, hide completion dialog
-		p.showCompletionDialog = false
-		p.completionOptions = nil
-		p.completionSelectedIdx = 0
-		p.completionPrefix = ""
-	}
-
 	return p, nil
 }
 
@@ -1106,14 +956,19 @@ func (p *InputPanel) insertCharacter(char string) (tea.Model, tea.Cmd) {
 	p.buffer = p.buffer[:p.cursorPosition] + char + p.buffer[p.cursorPosition:]
 	p.cursorPosition += len(char)
 
-	// Auto-trigger completion when typing '/' at the beginning
+	// Show completion dialog when "/" is typed at the beginning of the buffer
 	if char == "/" && p.cursorPosition == 1 {
-		return p.showCommandCompletion()
-	}
-
-	// Update completion if already showing and buffer starts with '/'
-	if p.showCompletionDialog && strings.HasPrefix(p.buffer, "/") {
-		return p.updateCommandCompletion()
+		p.showCompletionDialog = true
+		p.completionCommands = []string{
+			"clear",
+			"agent",
+			"agents",
+			"share",
+			"unshare",
+			"compact",
+			"summarize",
+		}
+		p.completionSelectedIdx = 0
 	}
 
 	return p, p.syncInputState()
@@ -1226,73 +1081,6 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	case "/agent":
 		if len(args) > 0 {
 			cmdToExecute = p.changeAgent(args[0])
-		}
-	// Add support for additional command aliases
-	case "/sessions", "/resume", "/continue":
-		// These are aliases for session list functionality
-		// For now, just show help message indicating these commands exist
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Session management commands: /sessions, /resume, /continue"}
-		}
-	case "/timeline", "/history", "/goto":
-		// These are aliases for session timeline functionality
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Timeline commands: /timeline, /history, /goto"}
-		}
-	case "/share", "/unshare":
-		// Session sharing commands
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Sharing commands: /share, /unshare"}
-		}
-	case "/compact", "/summarize":
-		// Session compacting commands
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Compact commands: /compact, /summarize"}
-		}
-	case "/editor":
-		// Editor command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Editor command: /editor"}
-		}
-	case "/export":
-		// Export command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Export command: /export"}
-		}
-	case "/details":
-		// Tool details command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Details command: /details"}
-		}
-	case "/thinking":
-		// Thinking blocks command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Thinking command: /thinking"}
-		}
-	case "/themes":
-		// Themes list command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Themes command: /themes"}
-		}
-	case "/init":
-		// Project init command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Init command: /init"}
-		}
-	case "/undo":
-		// Undo command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Undo command: /undo"}
-		}
-	case "/redo":
-		// Redo command
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Redo command: /redo"}
-		}
-	case "/exit", "/quit", "/q":
-		// Exit commands
-		cmdToExecute = func() tea.Msg {
-			return InfoMsg{Message: "Exit commands: /exit, /quit, /q"}
 		}
 	}
 
@@ -2588,53 +2376,6 @@ func (p *InputPanel) renderModelDialog() string {
 	return result.String()
 }
 
-func (p *InputPanel) renderCompletionDialog() string {
-	if !p.showCompletionDialog || len(p.completionOptions) == 0 {
-		return ""
-	}
-
-	// Get current theme
-	t := theme.CurrentTheme()
-
-	// Build the completion dialog
-	var content strings.Builder
-
-	// Title
-	content.WriteString(styles.NewStyle().
-		Foreground(t.Primary()).
-		Bold(true).
-		Render("Command Completion"))
-	content.WriteString("\n\n")
-
-	// Show completion options
-	for i, option := range p.completionOptions {
-		var style styles.Style
-		if i == p.completionSelectedIdx {
-			// Highlight selected option
-			style = styles.NewStyle().
-				Background(t.Primary()).
-				Foreground(t.BackgroundElement()).
-				PaddingLeft(1).
-				PaddingRight(1)
-			content.WriteString(style.Render("▶ " + option))
-		} else {
-			style = styles.NewStyle().
-				Foreground(t.Text()).
-				PaddingLeft(1).
-				PaddingRight(1)
-			content.WriteString(style.Render("  " + option))
-		}
-		content.WriteString("\n")
-	}
-
-	content.WriteString("\n")
-	content.WriteString(styles.NewStyle().
-		Foreground(t.TextMuted()).
-		Render("↑/↓ navigate • Enter select • Esc cancel"))
-
-	return content.String()
-}
-
 func (p *InputPanel) renderAgentDialog() string {
 	var result strings.Builder
 
@@ -2797,6 +2538,62 @@ func (p *InputPanel) renderAgentDialog() string {
 	return result.String()
 }
 
+func (p *InputPanel) renderCompletionDialog() string {
+	var result strings.Builder
+
+	// Calculate dialog dimensions
+	dialogWidth := min(p.width-4, 40)   // Smaller width for completion dialog
+	dialogHeight := min(p.height-4, 15) // Smaller height for completion dialog
+
+	// Top border
+	result.WriteString("┌" + strings.Repeat("─", dialogWidth-2) + "┐\n")
+
+	// Title line with close hint
+	title := " Command Completion "
+	closeHint := " esc "
+	padding := dialogWidth - len(title) - len(closeHint) - 2
+	if padding < 0 {
+		padding = 0
+	}
+	result.WriteString("│" + title + strings.Repeat(" ", padding) + closeHint + "│\n")
+
+	// Separator
+	result.WriteString("├" + strings.Repeat("─", dialogWidth-2) + "┤\n")
+
+	// Available commands section
+	maxCommands := dialogHeight - 4 // Reserve space for header and borders
+
+	// Show available commands
+	for i, command := range p.completionCommands {
+		if i >= maxCommands {
+			break
+		}
+
+		// Highlight selected command
+		prefix := " "
+		if i == p.completionSelectedIdx {
+			prefix = "▶"
+		}
+
+		commandLine := prefix + " " + command
+		commandPadding := dialogWidth - len(commandLine) - 2
+		if commandPadding < 0 {
+			commandPadding = 0
+		}
+		result.WriteString("│" + commandLine + strings.Repeat(" ", commandPadding) + "│\n")
+	}
+
+	// Fill remaining space
+	for i := len(p.completionCommands); i < maxCommands; i++ {
+		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
+	}
+
+	// Bottom border
+	result.WriteString("└" + strings.Repeat("─", dialogWidth-2) + "┘")
+
+	return result.String()
+}
+
 // Message types
 type ConnectedMsg struct{}
 
@@ -2948,15 +2745,10 @@ func main() {
 		log.Fatal("Failed to set theme:", err)
 	}
 
-	// Create context for cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Define comfortable themes
-	comfortableThemes := []string{"opencode", "dark", "light", "monokai", "solarized"}
-	currentTheme := "opencode"
-
 	// Create and run panel
-	panel := NewInputPanel(httpClient, comfortableThemes, currentTheme, ctx, cancel)
+	comfortableThemes := []string{"opencode", "dark", "light"} // Default comfortable themes
+	currentTheme := "opencode"                                 // Default theme
+	panel := NewInputPanel(httpClient, socketPath, comfortableThemes, currentTheme)
 
 	program := tea.NewProgram(
 		panel,
@@ -2968,6 +2760,7 @@ func main() {
 	panel.program = program
 
 	// Handle signals
+	_, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 

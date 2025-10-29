@@ -61,7 +61,7 @@ var completionDialogKeys = completionDialogKeyMap{
 }
 
 func (c *completionDialogComponent) Init() tea.Cmd {
-	return c.getAllCompletions("")
+	return nil
 }
 
 func (c *completionDialogComponent) getAllCompletions(query string) tea.Cmd {
@@ -289,6 +289,26 @@ func NewCompletionDialogComponent(
 		list:                 li,
 		trigger:              trigger,
 	}
+
+	// Load initial items from all providers
+	go func() {
+		allItems := make([]completions.CompletionSuggestion, 0)
+		for _, provider := range providers {
+			items, err := provider.GetChildEntries("")
+			if err != nil {
+				slog.Error(
+					"Failed to get completion items",
+					"provider",
+					provider.GetId(),
+					"error",
+					err,
+				)
+				continue
+			}
+			allItems = append(allItems, items...)
+		}
+		li.SetItems(allItems)
+	}()
 
 	return c
 }
