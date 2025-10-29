@@ -897,7 +897,7 @@ func (p *InputPanel) updateCompletionScrollOffset() {
 // handleTab processes tab completion
 func (p *InputPanel) handleTab() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(p.buffer, "/") {
-		commands := []string{"/help", "/clear", "/session", "/new", "/delete", "/theme", "/model", "/agent"}
+		commands := []string{"/help", "/clear", "/session", "/new", "/delete", "/theme", "/model", "/models", "/agent", "/agents"}
 
 		for _, cmd := range commands {
 			if strings.HasPrefix(cmd, p.buffer) && len(cmd) > len(p.buffer) {
@@ -997,9 +997,11 @@ func (p *InputPanel) insertCharacter(char string) (tea.Model, tea.Cmd) {
 	if char == "/" && p.cursorPosition == 1 {
 		p.showCompletionDialog = true
 		p.completionCommands = []string{
+			"new",
+			"models",
+			"agents",
 			"clear",
 			"agent",
-			"agents",
 			"share",
 			"unshare",
 			"compact",
