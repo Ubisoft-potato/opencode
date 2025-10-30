@@ -90,6 +90,7 @@ type MessagesPanel struct {
 	eventsChan       chan state.StateEvent
 	markdownMode     bool // true for markdown rendering, false for plain text
 	lineRenderer     *LineBasedRenderer
+	refreshTicker    *time.Ticker // Add ticker for periodic refresh
 }
 
 // NewMessagesPanel creates a new messages panel
@@ -160,6 +161,9 @@ func (p *MessagesPanel) Init() tea.Cmd {
 	// Subscribe to IPC events bridged via eventsChan
 	cmds = append(cmds, p.subscribeEvents())
 
+	// Start refresh ticker for pending messages
+	cmds = append(cmds, p.startRefreshTicker())
+
 	return tea.Batch(cmds...)
 }
 
@@ -197,6 +201,35 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StreamingUpdateMsg:
 		return p.handleStreamingUpdate(msg)
+
+	case RefreshTickMsg:
+		// Periodic refresh for pending messages
+		hasPendingMessages := false
+		for _, message := range p.messages {
+			if message.Status == "pending" {
+				hasPendingMessages = true
+				break
+			}
+		}
+
+		if hasPendingMessages {
+			// Rebuild rendered lines to ensure real-time updates for pending messages
+			mode := "plain"
+			if p.markdownMode {
+				mode = "markdown"
+			}
+			p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+			// Auto-scroll if enabled
+			if p.autoScroll {
+				p.scrollToBottom()
+			}
+
+			log.Printf("[MESSAGES] Refreshed display for pending messages")
+		}
+
+		// Continue the refresh cycle
+		return p, p.startRefreshTicker()
 
 	default:
 		return p, nil
@@ -405,13 +438,24 @@ func (p *MessagesPanel) refreshMessages() tea.Cmd {
 				content = fmt.Sprintf("Unknown message type: %T", msg)
 			}
 
+			// Determine message status based on completion time
+			status := "completed"
+			if messageType == "assistant" {
+				// Check if the message has a completed time
+				if timeMap, ok := message.Info.Time.(map[string]interface{}); ok {
+					if _, hasCompleted := timeMap["completed"]; !hasCompleted {
+						status = "pending"
+					}
+				}
+			}
+
 			messageInfo := types.MessageInfo{
 				ID:        message.Info.ID,
 				SessionID: p.currentSessionID,
 				Type:      messageType,
 				Content:   content,
 				Timestamp: time.Now(), // You might want to extract actual timestamp
-				Status:    "completed",
+				Status:    status,
 			}
 
 			messageInfos = append(messageInfos, messageInfo)
@@ -491,10 +535,14 @@ func (p *MessagesPanel) handleMessageUpdated(event state.StateEvent) error {
 				}
 				p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
 
-				// Auto-scroll to bottom if enabled and this is a streaming update
-				if p.autoScroll && payload.Status == "pending" {
+				// Auto-scroll to bottom if enabled for streaming updates or message completion
+				if p.autoScroll && (payload.Status == "pending" || payload.Status == "completed") {
 					p.scrollToBottom()
-					log.Printf("[MESSAGES] Auto-scrolled for streaming update")
+					if payload.Status == "pending" {
+						log.Printf("[MESSAGES] Auto-scrolled for streaming update")
+					} else if payload.Status == "completed" {
+						log.Printf("[MESSAGES] Auto-scrolled for message completion")
+					}
 				}
 			}
 
@@ -593,13 +641,24 @@ func (p *MessagesPanel) handleSessionChanged(event state.StateEvent) error {
 						content = fmt.Sprintf("Unknown message type: %T", msg)
 					}
 
+					// Determine message status based on completion time
+					status := "completed"
+					if messageType == "assistant" {
+						// Check if the message has a completed time
+						if timeMap, ok := message.Info.Time.(map[string]interface{}); ok {
+							if _, hasCompleted := timeMap["completed"]; !hasCompleted {
+								status = "pending"
+							}
+						}
+					}
+
 					messageInfo := types.MessageInfo{
 						ID:        message.Info.ID,
 						SessionID: p.currentSessionID,
 						Type:      messageType,
 						Content:   content,
 						Timestamp: time.Now(), // Use time.Now() for safety, like in refreshMessages
-						Status:    "completed",
+						Status:    status,
 					}
 					messageInfos = append(messageInfos, messageInfo)
 				}
@@ -758,10 +817,15 @@ func (p *MessagesPanel) forwardEventToUI(event state.StateEvent) error {
 
 // subscribeEvents returns a command that waits for the next IPC event and emits it as a MessageEventMsg
 func (p *MessagesPanel) subscribeEvents() tea.Cmd {
-	return func() tea.Msg {
-		evt := <-p.eventsChan
-		return MessageEventMsg{Event: evt}
-	}
+	return tea.Cmd(func() tea.Msg {
+		return MessageEventMsg{Event: <-p.eventsChan}
+	})
+}
+
+func (p *MessagesPanel) startRefreshTicker() tea.Cmd {
+	return tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
+		return RefreshTickMsg{}
+	})
 }
 
 func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model, tea.Cmd) {
@@ -771,6 +835,18 @@ func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model
 			if message.ID == msg.MessageID {
 				p.messages[i].Content = msg.Content
 				p.messages[i].Status = msg.Status
+
+				// Rebuild rendered lines to reflect the updated content
+				mode := "plain"
+				if p.markdownMode {
+					mode = "markdown"
+				}
+				p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+				// Auto-scroll to bottom if enabled
+				if p.autoScroll {
+					p.scrollToBottom()
+				}
 				break
 			}
 		}
@@ -1094,12 +1170,6 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 		}
 	}
 
-	// Skip rendering empty assistant messages that are still pending
-	// This prevents showing "🤖 Assistant: ⏳" with no actual content
-	if message.Type == "assistant" && message.Status == "pending" && strings.TrimSpace(content) == "" {
-		return ""
-	}
-
 	// Add status indicator for pending messages
 	if message.Status == "pending" {
 		if p.markdownMode {
@@ -1110,6 +1180,20 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 			}
 		} else {
 			content += " ⏳"
+		}
+
+		// For empty pending assistant messages, show a placeholder with pending indicator
+		if message.Type == "assistant" && strings.TrimSpace(message.Content) == "" {
+			if p.markdownMode {
+				lines := strings.Split(content, "\n")
+				if len(lines) > 0 {
+					// Replace the last line to show "正在思考..." instead of just the prefix
+					lines[len(lines)-1] = prefix + "正在思考... ⏳"
+					content = strings.Join(lines, "\n")
+				}
+			} else {
+				content = prefix + "正在思考... ⏳"
+			}
 		}
 	} else if message.Status == "error" {
 		if p.markdownMode {
@@ -1189,6 +1273,8 @@ type StreamingUpdateMsg struct {
 	Status    string
 }
 
+type RefreshTickMsg struct{}
+
 // Utility functions
 func max(a, b int) int {
 	if a > b {
@@ -1208,7 +1294,7 @@ func min(a, b int) int {
 
 // generateContentHash creates a hash for caching purposes
 func (lr *LineBasedRenderer) generateContentHash(message types.MessageInfo, width int, mode string, showTimestamps bool) string {
-	content := fmt.Sprintf("%s|%s|%d|%s|%t|%s", message.ID, message.Content, width, mode, showTimestamps, message.Type)
+	content := fmt.Sprintf("%s|%s|%s|%d|%s|%t|%s", message.ID, message.Content, message.Status, width, mode, showTimestamps, message.Type)
 	hash := md5.Sum([]byte(content))
 	return hex.EncodeToString(hash[:])
 }
@@ -1217,23 +1303,47 @@ func (lr *LineBasedRenderer) generateContentHash(message types.MessageInfo, widt
 func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, width int, mode string, showTimestamps bool) []RenderedLine {
 	log.Printf("[RENDERER] Rendering message %s (type=%s, mode=%s, width=%d)", message.ID, message.Type, mode, width)
 
-	// Skip rendering empty assistant messages that are still pending
-	// This prevents showing "🤖 Assistant: ⏳" with no actual content
+	// For empty pending assistant messages, show a thinking placeholder
 	if message.Type == "assistant" && message.Status == "pending" && strings.TrimSpace(message.Content) == "" {
-		return []RenderedLine{}
+		prefix := "🤖 Assistant: "
+		placeholder := "正在思考... ⏳"
+		finalLine := prefix + placeholder
+
+		// Add timestamp if enabled
+		if showTimestamps {
+			timestamp := message.Timestamp.Format("15:04:05")
+			finalLine = fmt.Sprintf("[%s] %s", timestamp, finalLine)
+		}
+
+		return []RenderedLine{{
+			Content:         finalLine,
+			MessageID:       message.ID,
+			MessageType:     message.Type,
+			LineIndex:       0,
+			IsFirstLine:     true,
+			IsLastLine:      true,
+			IsSeparator:     false,
+			NeedsBackground: false,
+			BackgroundWidth: 0,
+		}}
 	}
 
 	contentHash := lr.generateContentHash(message, width, mode, showTimestamps)
 
-	// Check cache first
-	if cached, exists := lr.renderCache[contentHash]; exists {
-		lr.cacheHits++
-		log.Printf("[RENDERER] Cache hit for message %s (hash=%s)", message.ID, contentHash[:8])
-		return cached.RenderedLines
+	// Skip cache for pending messages to ensure real-time updates
+	var useCaching bool = message.Status != "pending"
+
+	// Check cache first (only for non-pending messages)
+	if useCaching {
+		if cached, exists := lr.renderCache[contentHash]; exists {
+			lr.cacheHits++
+			log.Printf("[RENDERER] Cache hit for message %s (hash=%s)", message.ID, contentHash[:8])
+			return cached.RenderedLines
+		}
 	}
 
 	lr.cacheMisses++
-	log.Printf("[RENDERER] Cache miss for message %s (hash=%s)", message.ID, contentHash[:8])
+	log.Printf("[RENDERER] Cache miss for message %s (hash=%s, pending=%t)", message.ID, contentHash[:8], message.Status == "pending")
 
 	var lines []RenderedLine
 	var renderedContent string
@@ -1357,14 +1467,16 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 		}
 	}
 
-	// Cache the result
-	lr.renderCache[contentHash] = &MessageRenderCache{
-		ContentHash:   contentHash,
-		RenderedLines: lines,
-		Height:        len(lines),
-		Width:         width,
-		Mode:          mode,
-		CreatedAt:     time.Now(),
+	// Cache the result (only for non-pending messages)
+	if useCaching {
+		lr.renderCache[contentHash] = &MessageRenderCache{
+			ContentHash:   contentHash,
+			RenderedLines: lines,
+			Height:        len(lines),
+			Width:         width,
+			Mode:          mode,
+			CreatedAt:     time.Now(),
+		}
 	}
 
 	log.Printf("[RENDERER] Rendered message %s into %d lines", message.ID, len(lines))
@@ -1411,46 +1523,56 @@ func (lr *LineBasedRenderer) wordWrap(text string, width int) string {
 func (lr *LineBasedRenderer) rebuildRenderedLines(messages []types.MessageInfo, width int, mode string, showTimestamps bool) {
 	log.Printf("[RENDERER] Rebuilding rendered lines for %d messages (width=%d, mode=%s)", len(messages), width, mode)
 
-	lr.renderedLines = make([]RenderedLine, 0)
+	lr.renderedLines = []RenderedLine{}
 	lr.lineToMessage = make(map[int]string)
 	lr.totalLines = 0
+	lr.lastRenderWidth = width
 
-	lineIndex := 0
-	for messageIdx, message := range messages {
-		messageLines := lr.renderMessageToLines(message, width, mode, showTimestamps)
-
-		// Update line indices and add to global list
-		for i, line := range messageLines {
-			line.LineIndex = lineIndex + i
-			lr.renderedLines = append(lr.renderedLines, line)
-			lr.lineToMessage[lineIndex+i] = message.ID
-		}
-
-		lineIndex += len(messageLines)
-
-		// Add separator lines between messages (except after the last message)
-		// Use 2 empty lines for better visual separation
-		if messageIdx < len(messages)-1 {
-			for i := 0; i < 2; i++ {
-				separatorLine := RenderedLine{
-					Content:         "",
-					MessageID:       "",
-					MessageType:     "separator",
-					LineIndex:       lineIndex,
-					IsFirstLine:     false,
-					IsLastLine:      false,
-					IsSeparator:     true,
-					NeedsBackground: false,
-					BackgroundWidth: 0,
-				}
-				lr.renderedLines = append(lr.renderedLines, separatorLine)
-				lineIndex++
-			}
+	// Find the latest pending assistant message to avoid showing multiple "thinking" indicators
+	latestPendingAssistantIndex := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Type == "assistant" && messages[i].Status == "pending" && strings.TrimSpace(messages[i].Content) == "" {
+			latestPendingAssistantIndex = i
+			break
 		}
 	}
 
-	lr.totalLines = lineIndex
-	lr.lastRenderWidth = width
+	for i, message := range messages {
+		// Skip older pending assistant messages with empty content to avoid multiple "thinking" indicators
+		if message.Type == "assistant" && message.Status == "pending" && strings.TrimSpace(message.Content) == "" && i != latestPendingAssistantIndex {
+			log.Printf("[RENDERER] Skipping older pending assistant message %s to avoid duplicate thinking indicators", message.ID)
+			continue
+		}
+
+		messageLines := lr.renderMessageToLines(message, width, mode, showTimestamps)
+
+		// Update line indices and message mapping
+		for j, line := range messageLines {
+			line.LineIndex = lr.totalLines + j
+			lr.lineToMessage[line.LineIndex] = message.ID
+			lr.renderedLines = append(lr.renderedLines, line)
+		}
+
+		lr.totalLines += len(messageLines)
+		log.Printf("[RENDERER] Rendered message %s into %d lines", message.ID, len(messageLines))
+
+		// Add separator line between messages (except for the last message)
+		if i < len(messages)-1 {
+			separatorLine := RenderedLine{
+				Content:         "",
+				MessageID:       "",
+				MessageType:     "separator",
+				LineIndex:       lr.totalLines,
+				IsFirstLine:     false,
+				IsLastLine:      false,
+				IsSeparator:     true,
+				NeedsBackground: false,
+				BackgroundWidth: 0,
+			}
+			lr.renderedLines = append(lr.renderedLines, separatorLine)
+			lr.totalLines++
+		}
+	}
 
 	log.Printf("[RENDERER] Rebuilt %d total lines from %d messages", lr.totalLines, len(messages))
 }
