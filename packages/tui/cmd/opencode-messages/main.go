@@ -1342,6 +1342,12 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 		}}
 	}
 
+	// Skip empty completed assistant messages (they were thinking placeholders)
+	if message.Type == "assistant" && message.Status == "completed" && strings.TrimSpace(message.Content) == "" {
+		log.Printf("[RENDERER] Skipping empty completed assistant message %s", message.ID)
+		return []RenderedLine{}
+	}
+
 	contentHash := lr.generateContentHash(message, width, mode, showTimestamps)
 
 	// Skip cache for pending messages to ensure real-time updates

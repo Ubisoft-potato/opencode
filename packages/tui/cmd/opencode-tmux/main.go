@@ -787,23 +787,31 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
 			}
 			// Avoid duplicate additions if multiple message.updated events arrive for same ID
 			exists := false
+			currentStatus := ""
 			st := orch.syncManager.GetState()
 			for _, m := range st.Messages {
 				if m.ID == msg.ID {
 					exists = true
+					currentStatus = m.Status
 					break
 				}
 			}
 			if exists {
-				// Update status based on role in case placeholder was created earlier
-				desiredStatus := "pending"
-				if info.Role == opencode.MessageRoleUser {
-					desiredStatus = "completed"
-				}
-				if err := orch.syncManager.UpdateMessage(msg.ID, "", desiredStatus, "sse"); err != nil {
-					log.Printf("[SSE] Failed to refresh message status for %s: %v", msg.ID, err)
+				// Only update status if the message is not already completed
+				// This prevents message.updated events from overwriting the "completed" status
+				// that was set by step-finish events
+				if currentStatus != "completed" {
+					desiredStatus := "pending"
+					if info.Role == opencode.MessageRoleUser {
+						desiredStatus = "completed"
+					}
+					if err := orch.syncManager.UpdateMessage(msg.ID, "", desiredStatus, "sse"); err != nil {
+						log.Printf("[SSE] Failed to refresh message status for %s: %v", msg.ID, err)
+					} else {
+						log.Printf("[SSE] Message metadata exists; status refreshed: %s -> %s", msg.ID, desiredStatus)
+					}
 				} else {
-					log.Printf("[SSE] Message metadata exists; status refreshed: %s -> %s", msg.ID, desiredStatus)
+					log.Printf("[SSE] Message metadata exists but already completed; skipping status update: %s", msg.ID)
 				}
 			} else {
 				if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
