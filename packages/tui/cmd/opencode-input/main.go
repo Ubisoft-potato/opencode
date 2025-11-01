@@ -1493,8 +1493,17 @@ func (p *InputPanel) showHelpMessage() tea.Cmd {
 }
 
 func (p *InputPanel) clearMessages() tea.Cmd {
-	// This would clear messages in the current session
 	return func() tea.Msg {
+		log.Printf("[INPUT] Clearing messages via TUI API")
+
+		// Call the TUI clear-prompt API
+		_, err := p.client.Tui.ClearPrompt(p.ctx, opencode.TuiClearPromptParams{})
+		if err != nil {
+			log.Printf("[INPUT] Failed to clear messages: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to clear messages: %w", err)}
+		}
+
+		log.Printf("[INPUT] Successfully called clear-prompt API")
 		return InfoMsg{Message: "Messages cleared"}
 	}
 }

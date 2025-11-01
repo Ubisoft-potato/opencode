@@ -158,7 +158,7 @@ func (p *MessagesPanel) Init() tea.Cmd {
 		return ErrorMsg{Error: fmt.Errorf("failed to load state")}
 	})
 
-	// Subscribe to IPC events bridged via eventsChan
+	// Subscribe to IPC events bridged via eventsChan (only if IPC is connected)
 	cmds = append(cmds, p.subscribeEvents())
 
 	// Start refresh ticker for pending messages
@@ -192,6 +192,14 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrorMsg:
 		log.Printf("Messages panel error: %v", msg.Error)
+		// If we can't connect to IPC, try to work with just the session ID from environment
+		if p.currentSessionID == "" {
+			if sessionID := os.Getenv("OPENCODE_SESSION"); sessionID != "" {
+				p.currentSessionID = sessionID
+				// Try to refresh messages directly from HTTP API
+				return p, p.refreshMessages()
+			}
+		}
 		return p, nil
 
 	case MessageEventMsg:
@@ -213,19 +221,8 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if hasPendingMessages {
-			// Rebuild rendered lines to ensure real-time updates for pending messages
-			mode := "plain"
-			if p.markdownMode {
-				mode = "markdown"
-			}
-			p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
-
-			// Auto-scroll if enabled
-			if p.autoScroll {
-				p.scrollToBottom()
-			}
-
-			log.Printf("[MESSAGES] Refreshed display for pending messages")
+			// Refresh messages from API to get latest status
+			return p, tea.Batch(p.refreshMessages(), p.startRefreshTicker())
 		}
 
 		// Continue the refresh cycle
@@ -441,9 +438,10 @@ func (p *MessagesPanel) refreshMessages() tea.Cmd {
 			// Determine message status based on completion time
 			status := "completed"
 			if messageType == "assistant" {
-				// Check if the message has a completed time
-				if timeMap, ok := message.Info.Time.(map[string]interface{}); ok {
-					if _, hasCompleted := timeMap["completed"]; !hasCompleted {
+				// Check if the message has a completed time using the correct AssistantMessageTime structure
+				if assistantTime, ok := message.Info.Time.(opencode.AssistantMessageTime); ok {
+					// If Completed is 0, it means the message is still pending
+					if assistantTime.Completed == 0 {
 						status = "pending"
 					}
 				}
@@ -787,20 +785,36 @@ func decodePayload[T any](data map[string]interface{}, out *T) error {
 }
 
 func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, tea.Cmd) {
+	var needsRefresh bool
+
 	switch event.Type {
 	case state.EventMessageAdded:
 		p.handleMessageAdded(event)
+		needsRefresh = true
 	case state.EventMessageUpdated:
 		p.handleMessageUpdated(event)
+		needsRefresh = true
 	case state.EventMessageDeleted:
 		p.handleMessageDeleted(event)
+		needsRefresh = true
 	case state.EventSessionChanged:
 		p.handleSessionChanged(event)
+		needsRefresh = true
 	case state.EventStateSync:
 		p.handleStateSync(event)
+		needsRefresh = true
 	case types.EventThemeChanged:
 		p.handleThemeChanged(event)
+		needsRefresh = true
 	}
+
+	// Force a UI refresh by returning a no-op command that triggers a re-render
+	if needsRefresh {
+		return p, tea.Tick(time.Millisecond, func(time.Time) tea.Msg {
+			return RefreshTickMsg{}
+		})
+	}
+
 	return p, nil
 }
 
@@ -1187,12 +1201,12 @@ func (p *MessagesPanel) renderMessage(message types.MessageInfo) string {
 			if p.markdownMode {
 				lines := strings.Split(content, "\n")
 				if len(lines) > 0 {
-					// Replace the last line to show "正在思考..." instead of just the prefix
-					lines[len(lines)-1] = prefix + "正在思考... ⏳"
+					// Replace the last line to show "thinking..." instead of just the prefix
+					lines[len(lines)-1] = prefix + "thinking... ⏳"
 					content = strings.Join(lines, "\n")
 				}
 			} else {
-				content = prefix + "正在思考... ⏳"
+				content = prefix + "thinking... ⏳"
 			}
 		}
 	} else if message.Status == "error" {
@@ -1306,7 +1320,7 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 	// For empty pending assistant messages, show a thinking placeholder
 	if message.Type == "assistant" && message.Status == "pending" && strings.TrimSpace(message.Content) == "" {
 		prefix := "🤖 Assistant: "
-		placeholder := "正在思考... ⏳"
+		placeholder := "thinking... ⏳"
 		finalLine := prefix + placeholder
 
 		// Add timestamp if enabled
