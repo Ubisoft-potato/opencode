@@ -569,13 +569,10 @@ func (p *MessagesPanel) handleMessageDeleted(event state.StateEvent) error {
 }
 
 func (p *MessagesPanel) handleMessagesCleared(event state.StateEvent) error {
-	log.Printf("[MESSAGES] handleMessagesCleared called: version=%v, data=%+v", event.Version, event.Data)
 	p.version = event.Version
 	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-		log.Printf("[MESSAGES] payloadMap: %+v", payloadMap)
 		var payload types.MessagesClearPayload
 		if err := decodePayload(payloadMap, &payload); err == nil {
-			log.Printf("[MESSAGES] decoded payload: %+v", payload)
 			// Filter out messages from the cleared session
 			originalCount := len(p.messages)
 			filteredMessages := make([]types.MessageInfo, 0)
@@ -586,8 +583,8 @@ func (p *MessagesPanel) handleMessagesCleared(event state.StateEvent) error {
 			}
 			p.messages = filteredMessages
 
-			log.Printf("[MESSAGES] v%v Messages cleared for session %s (removed %d messages, %d remaining)",
-				event.Version, payload.SessionID, originalCount-len(p.messages), len(p.messages))
+			log.Printf("[MESSAGES] v%v Messages cleared for session %s (removed %d messages)",
+				event.Version, payload.SessionID, originalCount-len(p.messages))
 
 			// Rebuild rendered lines
 			mode := "plain"
@@ -600,11 +597,7 @@ func (p *MessagesPanel) handleMessagesCleared(event state.StateEvent) error {
 			if p.autoScroll {
 				p.scrollToBottom()
 			}
-		} else {
-			log.Printf("[MESSAGES] Failed to decode MessagesClearPayload")
 		}
-	} else {
-		log.Printf("[MESSAGES] Event data is not a map: %T", event.Data)
 	}
 	return nil
 }
@@ -827,7 +820,6 @@ func decodePayload[T any](data map[string]interface{}, out *T) error {
 }
 
 func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, tea.Cmd) {
-	log.Printf("[MESSAGES] handleMessageEvent called with event type: %v", event.Type)
 	var needsRefresh bool
 
 	switch event.Type {
@@ -852,8 +844,6 @@ func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, t
 	case types.EventThemeChanged:
 		p.handleThemeChanged(event)
 		needsRefresh = true
-	default:
-		log.Printf("[MESSAGES] Unhandled event type in handleMessageEvent: %v", event.Type)
 	}
 
 	// Force a UI refresh by returning a no-op command that triggers a re-render

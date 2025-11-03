@@ -95,13 +95,8 @@ func (bus *EventBus) broadcastUnsafe(event types.StateEvent, excludePanel string
 	// Add to event history
 	bus.addToHistoryUnsafe(event)
 
-	// Log broadcast details
-	log.Printf("[EVENTBUS] Broadcasting event %s from %s, excluding %s", event.Type, event.SourcePanel, excludePanel)
-	log.Printf("[EVENTBUS] Total subscribers: %d", len(bus.subscribers))
-
 	// Send to all subscribers except the source panel
 	for panelID, eventChan := range bus.subscribers {
-		log.Printf("[EVENTBUS] Checking subscriber %s (exclude: %s, match: %v)", panelID, excludePanel, panelID == excludePanel)
 		if panelID != excludePanel {
 			// Update subscriber metadata
 			if meta, exists := bus.subscriberMeta[panelID]; exists {
@@ -114,14 +109,11 @@ func (bus *EventBus) broadcastUnsafe(event types.StateEvent, excludePanel string
 			select {
 			case eventChan <- event:
 				// Event delivered successfully
-				log.Printf("[EVENTBUS] Successfully delivered event %s to panel %s", event.Type, panelID)
 			default:
 				// Channel full, log warning but continue
 				log.Printf("Warning: Event channel full for panel %s, dropping event %s",
 					panelID, event.Type)
 			}
-		} else {
-			log.Printf("[EVENTBUS] Skipping source panel %s", panelID)
 		}
 	}
 }
