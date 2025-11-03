@@ -19,29 +19,29 @@ import (
 
 // SocketClient manages Unix Domain Socket client for panel communication
 type SocketClient struct {
-    socketPath         string
-    panelID            string
-    panelType          string
-    conn               net.Conn
-    encoder            *json.Encoder
-    decoder            *json.Decoder
-    connectionID       string
-    isConnected        bool
-    connectionMux      sync.RWMutex
-    eventHandlers      map[types.StateEventType][]EventHandler
-    handlerMux         sync.RWMutex
-    ctx                context.Context
-    cancel             context.CancelFunc
-    reconnectDelay     time.Duration
-    maxReconnects      int
-    reconnectCount     int
-    lastPingTime       time.Time
-    pingInterval       time.Duration
-    pendingRequests    map[string]chan IPCMessage // Maps requestID to a response channel
-    pendingRequestsMux sync.Mutex                 // Mutex for pendingRequests map
-    currentVersion     int64                        // Track current state version
-    versionMux         sync.RWMutex                 // Mutex for version access
-    sendMutex          sync.Mutex                   // Synchronize writes to the connection
+	socketPath         string
+	panelID            string
+	panelType          string
+	conn               net.Conn
+	encoder            *json.Encoder
+	decoder            *json.Decoder
+	connectionID       string
+	isConnected        bool
+	connectionMux      sync.RWMutex
+	eventHandlers      map[types.StateEventType][]EventHandler
+	handlerMux         sync.RWMutex
+	ctx                context.Context
+	cancel             context.CancelFunc
+	reconnectDelay     time.Duration
+	maxReconnects      int
+	reconnectCount     int
+	lastPingTime       time.Time
+	pingInterval       time.Duration
+	pendingRequests    map[string]chan IPCMessage // Maps requestID to a response channel
+	pendingRequestsMux sync.Mutex                 // Mutex for pendingRequests map
+	currentVersion     int64                      // Track current state version
+	versionMux         sync.RWMutex               // Mutex for version access
+	sendMutex          sync.Mutex                 // Synchronize writes to the connection
 }
 
 // EventHandler defines the signature for event handling functions
@@ -129,20 +129,20 @@ func (client *SocketClient) Disconnect() error {
 
 // performHandshake exchanges handshake messages with the server
 func (client *SocketClient) performHandshake() error {
-    handshake := HandshakeMessage{
-        Type:      "handshake",
-        PanelID:   client.panelID,
-        PanelType: client.panelType,
-        Version:   "1.0",
-        Timestamp: time.Now(),
-    }
+	handshake := HandshakeMessage{
+		Type:      "handshake",
+		PanelID:   client.panelID,
+		PanelType: client.panelType,
+		Version:   "1.0",
+		Timestamp: time.Now(),
+	}
 
-    client.sendMutex.Lock()
-    err := client.encoder.Encode(handshake)
-    client.sendMutex.Unlock()
-    if err != nil {
-        return fmt.Errorf("failed to send handshake: %w", err)
-    }
+	client.sendMutex.Lock()
+	err := client.encoder.Encode(handshake)
+	client.sendMutex.Unlock()
+	if err != nil {
+		return fmt.Errorf("failed to send handshake: %w", err)
+	}
 
 	var response HandshakeResponse
 	if err := client.decoder.Decode(&response); err != nil {
@@ -168,10 +168,10 @@ func (client *SocketClient) sendRequestAndWait(message *IPCMessage, timeout time
 	}
 	client.connectionMux.RUnlock()
 
-    // Generate a unique request ID
-    requestID := uuid.New().String()
-    message.RequestID = requestID
-    log.Printf("[CLIENT] Sending request type=%s id=%s", message.Type, requestID)
+	// Generate a unique request ID
+	requestID := uuid.New().String()
+	message.RequestID = requestID
+	log.Printf("[CLIENT] Sending request type=%s id=%s", message.Type, requestID)
 
 	// Create a response channel for this specific request
 	respChan := make(chan IPCMessage, 1)
@@ -189,26 +189,26 @@ func (client *SocketClient) sendRequestAndWait(message *IPCMessage, timeout time
 		client.pendingRequestsMux.Unlock()
 	}()
 
-    // Send the request
-    client.sendMutex.Lock()
-    err := client.encoder.Encode(message)
-    client.sendMutex.Unlock()
-    if err != nil {
-        return nil, fmt.Errorf("failed to send request: %w", err)
-    }
+	// Send the request
+	client.sendMutex.Lock()
+	err := client.encoder.Encode(message)
+	client.sendMutex.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
 
 	// Wait for the response or timeout
-    select {
-    case response, ok := <-respChan:
-        if !ok {
-            return nil, fmt.Errorf("response channel closed unexpectedly for request %s", requestID)
-        }
-        log.Printf("[CLIENT] Received response type=%s id=%s", response.Type, requestID)
-        return &response, nil
-    case <-time.After(timeout):
-        log.Printf("[CLIENT] Timeout waiting for response id=%s type=%s", requestID, message.Type)
-        return nil, fmt.Errorf("timeout waiting for response for request %s", requestID)
-    }
+	select {
+	case response, ok := <-respChan:
+		if !ok {
+			return nil, fmt.Errorf("response channel closed unexpectedly for request %s", requestID)
+		}
+		log.Printf("[CLIENT] Received response type=%s id=%s", response.Type, requestID)
+		return &response, nil
+	case <-time.After(timeout):
+		log.Printf("[CLIENT] Timeout waiting for response id=%s type=%s", requestID, message.Type)
+		return nil, fmt.Errorf("timeout waiting for response for request %s", requestID)
+	}
 }
 
 // RequestState requests the current state from the server using the new sync mechanism.
@@ -281,6 +281,39 @@ func (client *SocketClient) SendStateUpdateAndWait(update types.StateUpdate) (in
 	}
 
 	return 0, fmt.Errorf("invalid state update response format")
+}
+
+// SendClearSessionMessages sends a request to clear all messages in a session
+func (client *SocketClient) SendClearSessionMessages(sessionID string) error {
+	message := IPCMessage{
+		Type: "clear_session_messages",
+		Data: map[string]interface{}{
+			"session_id": sessionID,
+			"panel_id":   client.panelID,
+		},
+		Timestamp: time.Now(),
+	}
+
+	response, err := client.sendRequestAndWait(&message, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to clear session messages: %w", err)
+	}
+
+	if response.Type == "error" {
+		if responseData, ok := response.Data.(map[string]interface{}); ok {
+			if errorMsg, ok := responseData["error"].(string); ok {
+				return fmt.Errorf(errorMsg)
+			}
+		}
+		return fmt.Errorf("unknown error clearing messages")
+	}
+
+	if response.Type != "clear_session_messages_response" {
+		return fmt.Errorf("unexpected response type: %s", response.Type)
+	}
+
+	log.Printf("[IPC-CLIENT] Successfully cleared messages for session %s", sessionID)
+	return nil
 }
 
 // RegisterEventHandler registers a handler for specific event types
@@ -418,18 +451,18 @@ func (client *SocketClient) sendPing() {
 	}
 	client.connectionMux.RUnlock()
 
-    message := IPCMessage{
-        Type:      "ping",
-        Timestamp: time.Now(),
-    }
+	message := IPCMessage{
+		Type:      "ping",
+		Timestamp: time.Now(),
+	}
 
-    client.sendMutex.Lock()
-    err := client.encoder.Encode(message)
-    client.sendMutex.Unlock()
-    if err != nil {
-        log.Printf("Failed to send ping: %v", err)
-        client.handleConnectionError(err)
-    }
+	client.sendMutex.Lock()
+	err := client.encoder.Encode(message)
+	client.sendMutex.Unlock()
+	if err != nil {
+		log.Printf("Failed to send ping: %v", err)
+		client.handleConnectionError(err)
+	}
 }
 
 // handleConnectionError handles connection errors and attempts reconnection

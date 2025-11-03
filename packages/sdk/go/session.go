@@ -168,6 +168,18 @@ func (r *SessionService) Messages(ctx context.Context, id string, query SessionM
 	return
 }
 
+// Clear all messages in a session
+func (r *SessionService) ClearMessages(ctx context.Context, id string, opts ...option.RequestOption) (res *SessionClearMessagesResponse, err error) {
+	opts = append(r.Options[:], opts...)
+	if id == "" {
+		err = errors.New("missing required id parameter")
+		return
+	}
+	path := fmt.Sprintf("session/%s/message", id)
+	err = requestconfig.ExecuteNewRequest(ctx, http.MethodDelete, path, nil, &res, opts...)
+	return
+}
+
 // Create and send a new message to a session
 func (r *SessionService) Prompt(ctx context.Context, id string, params SessionPromptParams, opts ...option.RequestOption) (res *SessionPromptResponse, err error) {
 	opts = append(r.Options[:], opts...)
@@ -2276,6 +2288,27 @@ func (r *UserMessageTime) UnmarshalJSON(data []byte) (err error) {
 }
 
 func (r userMessageTimeJSON) RawJSON() string {
+	return r.raw
+}
+
+type SessionClearMessagesResponse struct {
+	Count int64                            `json:"count,required"`
+	JSON  sessionClearMessagesResponseJSON `json:"-"`
+}
+
+// sessionClearMessagesResponseJSON contains the JSON metadata for the struct
+// [SessionClearMessagesResponse]
+type sessionClearMessagesResponseJSON struct {
+	Count       apijson.Field
+	raw         string
+	ExtraFields map[string]apijson.Field
+}
+
+func (r *SessionClearMessagesResponse) UnmarshalJSON(data []byte) (err error) {
+	return apijson.UnmarshalRoot(data, r)
+}
+
+func (r sessionClearMessagesResponseJSON) RawJSON() string {
 	return r.raw
 }
 

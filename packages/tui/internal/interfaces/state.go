@@ -52,6 +52,9 @@ type StateManager interface {
 
 	// GetMetrics returns state management performance metrics
 	GetMetrics() StateManagerMetrics
+
+	// ClearSessionMessages clears all messages for a given session
+	ClearSessionMessages(sessionID string, panelID string) error
 }
 
 // EventBus defines the interface for event distribution
@@ -166,17 +169,17 @@ type RepositoryStats struct {
 
 // StateManagerMetrics contains performance metrics for state management
 type StateManagerMetrics struct {
-	TotalUpdates         int64                         `json:"total_updates"`
-	SuccessfulUpdates    int64                         `json:"successful_updates"`
-	FailedUpdates        int64                         `json:"failed_updates"`
-	UpdatesByType        map[types.UpdateType]int64    `json:"updates_by_type"`
-	TotalSaves           int64                         `json:"total_saves"`
-	SuccessfulSaves      int64                         `json:"successful_saves"`
-	FailedSaves          int64                         `json:"failed_saves"`
-	AverageUpdateLatency time.Duration                `json:"average_update_latency"`
-	AverageSaveLatency   time.Duration                `json:"average_save_latency"`
-	LastUpdateTime       time.Time                    `json:"last_update_time"`
-	LastSaveTime         time.Time                    `json:"last_save_time"`
+	TotalUpdates         int64                      `json:"total_updates"`
+	SuccessfulUpdates    int64                      `json:"successful_updates"`
+	FailedUpdates        int64                      `json:"failed_updates"`
+	UpdatesByType        map[types.UpdateType]int64 `json:"updates_by_type"`
+	TotalSaves           int64                      `json:"total_saves"`
+	SuccessfulSaves      int64                      `json:"successful_saves"`
+	FailedSaves          int64                      `json:"failed_saves"`
+	AverageUpdateLatency time.Duration              `json:"average_update_latency"`
+	AverageSaveLatency   time.Duration              `json:"average_save_latency"`
+	LastUpdateTime       time.Time                  `json:"last_update_time"`
+	LastSaveTime         time.Time                  `json:"last_save_time"`
 }
 
 // GetSuccessRate returns the success rate for updates
@@ -206,12 +209,12 @@ type SubscriberInfo struct {
 
 // ConflictResolutionResult represents the outcome of conflict resolution
 type ConflictResolutionResult struct {
-	Success       bool          `json:"success"`
-	Attempts      int           `json:"attempts"`
-	Strategy      ConflictStrategy `json:"strategy"`
-	FinalVersion  int64         `json:"final_version"`
-	TimeTaken     time.Duration `json:"time_taken"`
-	Error         error         `json:"error,omitempty"`
+	Success      bool             `json:"success"`
+	Attempts     int              `json:"attempts"`
+	Strategy     ConflictStrategy `json:"strategy"`
+	FinalVersion int64            `json:"final_version"`
+	TimeTaken    time.Duration    `json:"time_taken"`
+	Error        error            `json:"error,omitempty"`
 }
 
 // ConflictStrategy defines how to resolve state conflicts
@@ -228,12 +231,12 @@ const (
 
 // ConflictStatistics provides metrics about conflict resolution performance
 type ConflictStatistics struct {
-	TotalAttempts   int64            `json:"total_attempts"`
-	SuccessCount    int64            `json:"success_count"`
-	ConflictCount   int64            `json:"conflict_count"`
-	RetryCount      int64            `json:"retry_count"`
-	SuccessRate     float64          `json:"success_rate"`
-	Strategy        ConflictStrategy `json:"strategy"`
+	TotalAttempts int64            `json:"total_attempts"`
+	SuccessCount  int64            `json:"success_count"`
+	ConflictCount int64            `json:"conflict_count"`
+	RetryCount    int64            `json:"retry_count"`
+	SuccessRate   float64          `json:"success_rate"`
+	Strategy      ConflictStrategy `json:"strategy"`
 }
 
 // BackupInfo contains information about a backup file
@@ -257,42 +260,42 @@ type BackupStatistics struct {
 
 // HealthCheck represents a health check function
 type HealthCheck struct {
-	Name        string                             `json:"name"`
-	Description string                             `json:"description"`
-	CheckFunc   func() HealthCheckResult           `json:"-"`
-	Interval    time.Duration                      `json:"interval"`
-	LastCheck   time.Time                          `json:"last_check"`
-	LastResult  HealthCheckResult                  `json:"last_result"`
-	Enabled     bool                               `json:"enabled"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description"`
+	CheckFunc   func() HealthCheckResult `json:"-"`
+	Interval    time.Duration            `json:"interval"`
+	LastCheck   time.Time                `json:"last_check"`
+	LastResult  HealthCheckResult        `json:"last_result"`
+	Enabled     bool                     `json:"enabled"`
 }
 
 // HealthCheckResult represents the result of a health check
 type HealthCheckResult struct {
-	Healthy   bool          `json:"healthy"`
-	Message   string        `json:"message"`
-	Duration  time.Duration `json:"duration"`
-	Timestamp time.Time     `json:"timestamp"`
+	Healthy   bool                   `json:"healthy"`
+	Message   string                 `json:"message"`
+	Duration  time.Duration          `json:"duration"`
+	Timestamp time.Time              `json:"timestamp"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // HealthStatus represents the current health status
 type HealthStatus struct {
-	OverallHealthy bool                            `json:"overall_healthy"`
-	CheckResults   map[string]HealthCheckResult    `json:"check_results"`
-	Timestamp      time.Time                       `json:"timestamp"`
+	OverallHealthy bool                         `json:"overall_healthy"`
+	CheckResults   map[string]HealthCheckResult `json:"check_results"`
+	Timestamp      time.Time                    `json:"timestamp"`
 }
 
 // HealthStatistics contains health monitoring statistics
 type HealthStatistics struct {
-	TotalChecks         int64                    `json:"total_checks"`
-	HealthyChecks       int64                    `json:"healthy_checks"`
-	UnhealthyChecks     int64                    `json:"unhealthy_checks"`
-	ChecksByName        map[string]CheckStats    `json:"checks_by_name"`
-	LastCheckTime       time.Time                `json:"last_check_time"`
-	AverageCheckTime    time.Duration            `json:"average_check_time"`
-	OverallHealthy      bool                     `json:"overall_healthy"`
-	AlertsTriggered     int64                    `json:"alerts_triggered"`
-	RecoveriesTriggered int64                    `json:"recoveries_triggered"`
+	TotalChecks         int64                 `json:"total_checks"`
+	HealthyChecks       int64                 `json:"healthy_checks"`
+	UnhealthyChecks     int64                 `json:"unhealthy_checks"`
+	ChecksByName        map[string]CheckStats `json:"checks_by_name"`
+	LastCheckTime       time.Time             `json:"last_check_time"`
+	AverageCheckTime    time.Duration         `json:"average_check_time"`
+	OverallHealthy      bool                  `json:"overall_healthy"`
+	AlertsTriggered     int64                 `json:"alerts_triggered"`
+	RecoveriesTriggered int64                 `json:"recoveries_triggered"`
 }
 
 // CheckStats contains statistics for individual health checks
@@ -311,20 +314,20 @@ type CheckStats struct {
 type FailureType string
 
 const (
-	StateCorruption   FailureType = "state_corruption"
-	PanelCrash        FailureType = "panel_crash"
-	IPCFailure        FailureType = "ipc_failure"
-	FileSystemError   FailureType = "filesystem_error"
-	NetworkError      FailureType = "network_error"
-	GenericFailure    FailureType = "generic_failure"
+	StateCorruption FailureType = "state_corruption"
+	PanelCrash      FailureType = "panel_crash"
+	IPCFailure      FailureType = "ipc_failure"
+	FileSystemError FailureType = "filesystem_error"
+	NetworkError    FailureType = "network_error"
+	GenericFailure  FailureType = "generic_failure"
 )
 
 // RecoveryStatistics contains statistics about recovery operations
 type RecoveryStatistics struct {
-	TotalRecoveryAttempts int                  `json:"total_recovery_attempts"`
-	ActiveRecoveryTypes   int                  `json:"active_recovery_types"`
-	LastRecoveryTime      time.Time            `json:"last_recovery_time"`
-	IsRecovering         bool                 `json:"is_recovering"`
-	BackupStatistics     BackupStatistics     `json:"backup_statistics"`
-	HealthStatistics     HealthStatistics     `json:"health_statistics"`
+	TotalRecoveryAttempts int              `json:"total_recovery_attempts"`
+	ActiveRecoveryTypes   int              `json:"active_recovery_types"`
+	LastRecoveryTime      time.Time        `json:"last_recovery_time"`
+	IsRecovering          bool             `json:"is_recovering"`
+	BackupStatistics      BackupStatistics `json:"backup_statistics"`
+	HealthStatistics      HealthStatistics `json:"health_statistics"`
 }

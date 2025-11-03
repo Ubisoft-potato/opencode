@@ -1494,16 +1494,29 @@ func (p *InputPanel) showHelpMessage() tea.Cmd {
 
 func (p *InputPanel) clearMessages() tea.Cmd {
 	return func() tea.Msg {
-		log.Printf("[INPUT] Clearing messages via TUI API")
+		if p.currentSessionID == "" {
+			log.Printf("[INPUT] No session selected, cannot clear messages")
+			return ErrorMsg{Error: fmt.Errorf("no session selected")}
+		}
 
-		// Call the TUI clear-prompt API
-		_, err := p.client.Tui.ClearPrompt(p.ctx, opencode.TuiClearPromptParams{})
+		log.Printf("[INPUT] Clearing messages for session %s", p.currentSessionID)
+
+		// First, delete messages from backend
+		_, err := p.client.Session.ClearMessages(p.ctx, p.currentSessionID)
 		if err != nil {
-			log.Printf("[INPUT] Failed to clear messages: %v", err)
+			log.Printf("[INPUT] Failed to clear messages from backend: %v", err)
 			return ErrorMsg{Error: fmt.Errorf("failed to clear messages: %w", err)}
 		}
 
-		log.Printf("[INPUT] Successfully called clear-prompt API")
+		log.Printf("[INPUT] Successfully cleared messages from backend for session %s", p.currentSessionID)
+
+		// Then, send clear messages request via IPC to update local state
+		if err := p.ipcClient.SendClearSessionMessages(p.currentSessionID); err != nil {
+			log.Printf("[INPUT] Failed to sync clear messages state: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to sync state: %w", err)}
+		}
+
+		log.Printf("[INPUT] Successfully cleared messages for session %s", p.currentSessionID)
 		return InfoMsg{Message: "Messages cleared"}
 	}
 }

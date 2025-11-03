@@ -227,6 +227,20 @@ func (manager *PanelSyncManager) UpdateMessage(messageID, content, status string
 	return manager.applyUpdateWithEvents(update)
 }
 
+// ClearSessionMessages clears all messages for a given session
+func (manager *PanelSyncManager) ClearSessionMessages(sessionID string, panelID string) error {
+	update := types.StateUpdate{
+		ID:              generateUpdateID(),
+		Type:            types.MessagesCleared,
+		ExpectedVersion: manager.state.GetCurrentVersion(),
+		Payload:         types.MessagesClearPayload{SessionID: sessionID},
+		SourcePanel:     panelID,
+		Timestamp:       time.Now(),
+	}
+
+	return manager.applyUpdateWithEvents(update)
+}
+
 // UpdateInputBuffer handles input changes from Input panel
 func (manager *PanelSyncManager) UpdateInputBuffer(buffer string, cursorPos, selStart, selEnd int, mode, panelID string) error {
 	update := types.StateUpdate{
@@ -444,6 +458,34 @@ func (manager *PanelSyncManager) UpdateWithVersionCheck(update types.StateUpdate
 				break
 			}
 		}
+
+	case types.MessagesCleared:
+		var payload types.MessagesClearPayload
+		if err := decodePayload(update.Payload, &payload); err != nil {
+			return err
+		}
+		// Remove all messages for the given session
+		originalCount := len(manager.state.Messages)
+		filteredMessages := make([]types.MessageInfo, 0)
+		removedCount := 0
+		for _, msg := range manager.state.Messages {
+			if msg.SessionID != payload.SessionID {
+				filteredMessages = append(filteredMessages, msg)
+			} else {
+				removedCount++
+			}
+		}
+		manager.state.Messages = filteredMessages
+
+		// Update session message count to 0
+		for j := range manager.state.Sessions {
+			if manager.state.Sessions[j].ID == payload.SessionID {
+				manager.state.Sessions[j].MessageCount = 0
+				break
+			}
+		}
+		log.Printf("[SYNC] Cleared %d messages from session %s (original: %d, remaining: %d)",
+			removedCount, payload.SessionID, originalCount, len(manager.state.Messages))
 
 	case types.InputUpdated:
 		var payload types.InputUpdatePayload

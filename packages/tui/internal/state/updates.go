@@ -16,6 +16,7 @@ type SessionDeletePayload = types.SessionDeletePayload
 type MessageAddPayload = types.MessageAddPayload
 type MessageUpdatePayload = types.MessageUpdatePayload
 type MessageDeletePayload = types.MessageDeletePayload
+type MessagesClearPayload = types.MessagesClearPayload
 type InputUpdatePayload = types.InputUpdatePayload
 type CursorMovePayload = types.CursorMovePayload
 type ThemeChangePayload = types.ThemeChangePayload
@@ -32,6 +33,7 @@ const (
 	MessageAdded      = types.MessageAdded
 	MessageUpdated    = types.MessageUpdated
 	MessageDeleted    = types.MessageDeleted
+	MessagesCleared   = types.MessagesCleared
 	InputUpdated      = types.InputUpdated
 	CursorMoved       = types.CursorMoved
 	ThemeChanged      = types.ThemeChanged

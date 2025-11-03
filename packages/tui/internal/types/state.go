@@ -250,6 +250,7 @@ const (
 	EventMessageAdded      StateEventType = "message_added"
 	EventMessageUpdated    StateEventType = "message_updated"
 	EventMessageDeleted    StateEventType = "message_deleted"
+	EventMessagesCleared   StateEventType = "messages_cleared"
 	EventInputUpdated      StateEventType = "input_updated"
 	EventCursorMoved       StateEventType = "cursor_moved"
 	EventThemeChanged      StateEventType = "theme_changed"

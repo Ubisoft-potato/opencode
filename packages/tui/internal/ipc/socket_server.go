@@ -1,32 +1,32 @@
 package ipc
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "net"
-    "os"
-    "path/filepath"
-    "sync"
-    "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
 
-    "github.com/sst/opencode/internal/interfaces"
-    "github.com/sst/opencode/internal/types"
+	"github.com/sst/opencode/internal/interfaces"
+	"github.com/sst/opencode/internal/types"
 )
 
 // SocketServer manages Unix Domain Socket server for inter-panel communication
 type SocketServer struct {
-	socketPath      string
-	listener        net.Listener
-	connections     map[string]*ClientConnection
-	connectionsMux  sync.RWMutex
-	eventBus        interfaces.EventBus
-	stateManager    interfaces.StateManager
-	ctx             context.Context
-	cancel          context.CancelFunc
-	isRunning       bool
-	runningMux      sync.RWMutex
+	socketPath     string
+	listener       net.Listener
+	connections    map[string]*ClientConnection
+	connectionsMux sync.RWMutex
+	eventBus       interfaces.EventBus
+	stateManager   interfaces.StateManager
+	ctx            context.Context
+	cancel         context.CancelFunc
+	isRunning      bool
+	runningMux     sync.RWMutex
 }
 
 // ClientConnection represents a connected panel client
@@ -294,6 +294,8 @@ func (server *SocketServer) processClientMessage(clientConn *ClientConnection, m
 		server.handleStateUpdate(clientConn, message)
 	case "state_request":
 		server.handleStateRequest(clientConn, message)
+	case "clear_session_messages":
+		server.handleClearSessionMessages(clientConn, message)
 	case "ping":
 		server.handlePing(clientConn, message)
 	default:
@@ -313,22 +315,22 @@ func (server *SocketServer) handleStateUpdate(clientConn *ClientConnection, mess
 
 	update.SourcePanel = clientConn.PanelID
 
-    err := server.stateManager.UpdateWithVersionCheck(update)
-    if err != nil {
-        log.Printf("Failed to apply state update: %v", err)
-        server.sendErrorMessage(clientConn, "state_update_error", err.Error(), message.RequestID)
-        return
-    }
+	err := server.stateManager.UpdateWithVersionCheck(update)
+	if err != nil {
+		log.Printf("Failed to apply state update: %v", err)
+		server.sendErrorMessage(clientConn, "state_update_error", err.Error(), message.RequestID)
+		return
+	}
 
-    response := IPCMessage{
-        Type:      "state_update_response",
-        RequestID: message.RequestID,
-        Data: map[string]interface{}{
-            "success": true,
-            "version": server.stateManager.GetState().GetCurrentVersion(),
-        },
-        Timestamp: time.Now(),
-    }
+	response := IPCMessage{
+		Type:      "state_update_response",
+		RequestID: message.RequestID,
+		Data: map[string]interface{}{
+			"success": true,
+			"version": server.stateManager.GetState().GetCurrentVersion(),
+		},
+		Timestamp: time.Now(),
+	}
 	log.Printf("[SERVER] Sending state_update_response id=%s version=%d to panel=%s", message.RequestID, server.stateManager.GetState().GetCurrentVersion(), clientConn.PanelID)
 	if err := clientConn.send(response); err != nil {
 		log.Printf("Failed to send state update success response: %v", err)
@@ -351,6 +353,49 @@ func (server *SocketServer) handleStateRequest(clientConn *ClientConnection, mes
 	}
 	if err := clientConn.send(response); err != nil {
 		log.Printf("Failed to send state response: %v", err)
+	}
+}
+
+// handleClearSessionMessages processes clear session messages request
+func (server *SocketServer) handleClearSessionMessages(clientConn *ClientConnection, message IPCMessage) {
+	var requestData map[string]interface{}
+	if err := mapToStruct(message.Data, &requestData); err != nil {
+		log.Printf("Failed to decode clear messages request: %v", err)
+		server.sendError(clientConn, "invalid request")
+		return
+	}
+
+	sessionID, ok := requestData["session_id"].(string)
+	if !ok || sessionID == "" {
+		server.sendError(clientConn, "session_id is required")
+		return
+	}
+
+	panelID := clientConn.PanelID
+	if pid, ok := requestData["panel_id"].(string); ok && pid != "" {
+		panelID = pid
+	}
+
+	// Call syncManager to clear session messages
+	if err := server.stateManager.ClearSessionMessages(sessionID, panelID); err != nil {
+		log.Printf("Failed to clear session messages: %v", err)
+		server.sendErrorMessage(clientConn, "error", err.Error(), message.RequestID)
+		return
+	}
+
+	// Send success response
+	response := IPCMessage{
+		Type:      "clear_session_messages_response",
+		RequestID: message.RequestID,
+		Data: map[string]interface{}{
+			"success":    true,
+			"session_id": sessionID,
+		},
+		Timestamp: time.Now(),
+	}
+
+	if err := clientConn.send(response); err != nil {
+		log.Printf("Failed to send clear messages response: %v", err)
 	}
 }
 

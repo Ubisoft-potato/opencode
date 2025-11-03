@@ -276,12 +276,27 @@ export namespace Session {
   }
 
   export async function removeMessage(sessionID: string, messageID: string) {
+    // Remove all parts for this message first
+    for (const part of await Storage.list(["part", messageID])) {
+      await Storage.remove(part)
+    }
+    // Then remove the message itself
     await Storage.remove(["message", sessionID, messageID])
     Bus.publish(MessageV2.Event.Removed, {
       sessionID,
       messageID,
     })
     return messageID
+  }
+
+  export async function clearMessages(sessionID: string) {
+    const messages = await Storage.list(["message", sessionID])
+    for (const msgKey of messages) {
+      const messageID = msgKey.at(-1)!
+      // Reuse removeMessage which handles parts deletion
+      await removeMessage(sessionID, messageID)
+    }
+    return messages.length
   }
 
   export async function updatePart(part: MessageV2.Part) {

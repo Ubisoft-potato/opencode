@@ -17,6 +17,7 @@ const (
 	MessageAdded      UpdateType = "message_added"
 	MessageUpdated    UpdateType = "message_updated"
 	MessageDeleted    UpdateType = "message_deleted"
+	MessagesCleared   UpdateType = "messages_cleared"
 	InputUpdated      UpdateType = "input_updated"
 	CursorMoved       UpdateType = "cursor_moved"
 	ThemeChanged      UpdateType = "theme_changed"
@@ -75,6 +76,11 @@ type MessageUpdatePayload struct {
 // MessageDeletePayload represents deleting a message
 type MessageDeletePayload struct {
 	MessageID string `json:"message_id"`
+}
+
+// MessagesClearPayload represents clearing all messages in a session
+type MessagesClearPayload struct {
+	SessionID string `json:"session_id"`
 }
 
 // InputUpdatePayload represents input buffer changes

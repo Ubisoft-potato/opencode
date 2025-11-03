@@ -27,6 +27,7 @@ const (
 	EventMessageAdded      = types.EventMessageAdded
 	EventMessageUpdated    = types.EventMessageUpdated
 	EventMessageDeleted    = types.EventMessageDeleted
+	EventMessagesCleared   = types.EventMessagesCleared
 	EventInputUpdated      = types.EventInputUpdated
 	EventCursorMoved       = types.EventCursorMoved
 	EventThemeChanged      = types.EventThemeChanged

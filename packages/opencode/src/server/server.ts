@@ -661,6 +661,36 @@ export namespace Server {
           return c.json(message)
         },
       )
+      .delete(
+        "/session/:id/message",
+        describeRoute({
+          description: "Clear all messages in a session",
+          operationId: "session.clearMessages",
+          responses: {
+            200: {
+              description: "Successfully cleared messages",
+              content: {
+                "application/json": {
+                  schema: resolver(z.object({
+                    count: z.number().describe("Number of messages cleared"),
+                  })),
+                },
+              },
+            },
+          },
+        }),
+        validator(
+          "param",
+          z.object({
+            id: z.string().meta({ description: "Session ID" }),
+          }),
+        ),
+        async (c) => {
+          const sessionID = c.req.valid("param").id
+          const count = await Session.clearMessages(sessionID)
+          return c.json({ count })
+        },
+      )
       .post(
         "/session/:id/message",
         describeRoute({
