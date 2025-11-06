@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -27,21 +30,22 @@ import (
 
 // TmuxOrchestrator manages the tmux session and panels
 type TmuxOrchestrator struct {
-	sessionName string
-	socketPath  string
-	statePath   string
-	httpClient  *opencode.Client
-	ipcServer   *ipc.SocketServer
-	syncManager *state.PanelSyncManager
-	ctx         context.Context
-	cancel      context.CancelFunc
-	tmuxCommand string
-	isRunning   bool
-	serverOnly  bool
-	sseClient   *http.Client
-	serverURL   string
-	config      *tmuxconfig.File
-	panes       map[string]string
+	sessionName   string
+	socketPath    string
+	statePath     string
+	httpClient    *opencode.Client
+	ipcServer     *ipc.SocketServer
+	syncManager   *state.PanelSyncManager
+	ctx           context.Context
+	cancel        context.CancelFunc
+	tmuxCommand   string
+	isRunning     bool
+	serverOnly    bool
+	sseClient     *http.Client
+	serverURL     string
+	config        *tmuxconfig.File
+	panes         map[string]string
+	reuseExisting bool
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
@@ -111,6 +115,15 @@ func (orch *TmuxOrchestrator) Start() error {
 	}
 
 	orch.panes = map[string]string{}
+
+	if err := orch.handleExistingSession(); err != nil {
+		return err
+	}
+	if orch.reuseExisting {
+		orch.isRunning = true
+		log.Printf("Reusing existing tmux session without reconfiguration")
+		return nil
+	}
 
 	// Check if tmux is available
 	if !orch.isTmuxAvailable() {
@@ -404,6 +417,47 @@ func (orch *TmuxOrchestrator) configureDefaultPanels() error {
 	}
 
 	return nil
+}
+
+func (orch *TmuxOrchestrator) handleExistingSession() error {
+	cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", orch.sessionName)
+	if err := cmd.Run(); err != nil {
+		return nil
+	}
+
+	if !isTerminal() {
+		log.Printf("Existing tmux session detected but stdin is not a terminal, creating new session")
+		return orch.killTmuxSession()
+	}
+
+	fmt.Printf("检测到已有 tmux 会话: %s\n", orch.sessionName)
+	fmt.Printf("选择操作: [r] 复用现有会话 (默认) / [n] 新建并覆盖 / [q] 退出: ")
+
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("读取用户输入失败: %w", err)
+		}
+		choice := strings.ToLower(strings.TrimSpace(line))
+		if choice == "" {
+			choice = "r"
+		}
+
+		switch choice {
+		case "r", "reuse", "y":
+			orch.reuseExisting = true
+			return nil
+		case "n", "new":
+			log.Printf("User requested new tmux session, killing existing session: %s", orch.sessionName)
+			return orch.killTmuxSession()
+		case "q", "quit":
+			return fmt.Errorf("用户取消启动")
+		default:
+			fmt.Printf("输入无效，请输入 r / n / q: ")
+		}
+	}
 }
 
 func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
