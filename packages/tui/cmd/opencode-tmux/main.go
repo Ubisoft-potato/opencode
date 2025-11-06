@@ -469,6 +469,21 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 	panes := map[string]string{
 		"root": rootPane,
 	}
+	type paneLock struct {
+		lockX bool
+		lockY bool
+	}
+	sizeLocks := map[string]*paneLock{}
+
+	getLock := func(id string) *paneLock {
+		lock, ok := sizeLocks[id]
+		if ok {
+			return lock
+		}
+		lock = &paneLock{}
+		sizeLocks[id] = lock
+		return lock
+	}
 
 	for _, split := range orch.config.Splits {
 		target, ok := panes[split.Target]
@@ -480,7 +495,7 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 			return fmt.Errorf("split %s must define exactly two panels", split.Target)
 		}
 
-		args := []string{"split-window", "-P", "-F", "#{pane_id}", "-t", target}
+		args := []string{"split-window", "-P", "-F", "#{pane_id}"}
 		typ := strings.ToLower(strings.TrimSpace(split.Type))
 		if typ == "horizontal" {
 			args = append(args, "-h")
@@ -489,6 +504,29 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 			args = append(args, "-v")
 		}
 
+		first := split.Panels[0]
+		second := split.Panels[1]
+
+		if split.Ratio != "" {
+			_, secondPct, ok := orch.config.RatioPercents(split.Ratio)
+			if ok {
+				args = append(args, "-p", fmt.Sprintf("%d", secondPct))
+				lock := getLock(first)
+				lockSecond := getLock(second)
+				if typ == "horizontal" {
+					lock.lockX = true
+					lockSecond.lockX = true
+				} else {
+					lock.lockY = true
+					lockSecond.lockY = true
+				}
+			} else {
+				log.Printf("Invalid ratio %q for split %s, falling back to tmux defaults", split.Ratio, split.Target)
+			}
+		}
+
+		args = append(args, "-t", target)
+
 		cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, args...)
 		out, err := cmd.Output()
 		if err != nil {
@@ -496,31 +534,10 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 		}
 
 		newPane := strings.TrimSpace(string(out))
-		first := split.Panels[0]
-		second := split.Panels[1]
 
 		panes[first] = target
 		panes[second] = newPane
 
-		if split.Ratio != "" {
-			firstPct, _, ok := orch.config.RatioPercents(split.Ratio)
-			if ok {
-				if typ == "horizontal" {
-					scale := fmt.Sprintf("%d%%", firstPct)
-					sizeCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", panes[first], "-x", scale)
-					if err := sizeCmd.Run(); err != nil {
-						log.Printf("Failed to apply horizontal ratio for %s: %v", first, err)
-					}
-				}
-				if typ != "horizontal" {
-					scale := fmt.Sprintf("%d%%", firstPct)
-					sizeCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", panes[first], "-y", scale)
-					if err := sizeCmd.Run(); err != nil {
-						log.Printf("Failed to apply vertical ratio for %s: %v", first, err)
-					}
-				}
-			}
-		}
 	}
 
 	for _, panel := range orch.config.Panels {
@@ -528,9 +545,10 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 		if !ok {
 			continue
 		}
+		lock := sizeLocks[panel.ID]
 
 		width := strings.TrimSpace(panel.Width)
-		if width != "" {
+		if width != "" && (lock == nil || !lock.lockX) {
 			cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", target, "-x", width)
 			if err := cmd.Run(); err != nil {
 				log.Printf("Failed to apply width for %s: %v", panel.ID, err)
@@ -538,7 +556,7 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 		}
 
 		height := strings.TrimSpace(panel.Height)
-		if height != "" {
+		if height != "" && (lock == nil || !lock.lockY) {
 			cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", target, "-y", height)
 			if err := cmd.Run(); err != nil {
 				log.Printf("Failed to apply height for %s: %v", panel.ID, err)

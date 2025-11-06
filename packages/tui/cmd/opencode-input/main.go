@@ -32,26 +32,22 @@ type ModelInfo struct {
 
 // updateAgentScrollOffset updates the scroll offset for agent list to keep selected item visible
 func (p *InputPanel) updateAgentScrollOffset() {
-	dialogHeight := min(p.height-4, 20)
-	maxAgents := dialogHeight - 8 // Reserve space for header, search, etc.
-	if p.agentSearchQuery != "" {
-		maxAgents = dialogHeight - 5 // Less space needed when no recent section
-	}
-
-	// Ensure selected item is visible
+	base, visible := p.agentListCapacities()
 	if p.agentSelectedIdx < p.agentScrollOffset {
 		p.agentScrollOffset = p.agentSelectedIdx
-	} else if p.agentSelectedIdx >= p.agentScrollOffset+maxAgents {
-		p.agentScrollOffset = p.agentSelectedIdx - maxAgents + 1
+	}
+	if visible < 1 {
+		visible = 1
+	}
+	if p.agentSelectedIdx >= p.agentScrollOffset+visible {
+		p.agentScrollOffset = p.agentSelectedIdx - visible + 1
 	}
 
-	// Ensure scroll offset doesn't go negative
 	if p.agentScrollOffset < 0 {
 		p.agentScrollOffset = 0
 	}
 
-	// Ensure scroll offset doesn't exceed available agents
-	maxOffset := len(p.availableAgents) - maxAgents
+	maxOffset := len(p.availableAgents) - base
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -60,21 +56,43 @@ func (p *InputPanel) updateAgentScrollOffset() {
 	}
 }
 
+func (p *InputPanel) agentListCapacities() (int, int) {
+	dialogHeight := min(p.height-4, 20)
+	base := dialogHeight - 7
+	if p.agentSearchQuery != "" {
+		base = dialogHeight - 6
+	}
+	if base < 1 {
+		base = 1
+	}
+
+	visible := base
+	if p.agentScrollOffset > 0 && visible > 1 {
+		visible--
+	}
+
+	return base, visible
+}
+
 // filterAgents filters available agents based on search query
 func (p *InputPanel) filterAgents() {
+	// Get all available agents
+	allAgents := []AgentInfo{
+		{Name: "Code Assistant", Description: "General purpose coding assistant"},
+		{Name: "Debug Expert", Description: "Specialized in debugging and troubleshooting"},
+		{Name: "Architecture Advisor", Description: "Helps with system design and architecture"},
+		{Name: "Performance Optimizer", Description: "Focuses on code optimization and performance"},
+		{Name: "Security Auditor", Description: "Reviews code for security vulnerabilities"},
+		{Name: "Test Generator", Description: "Creates comprehensive test suites"},
+		{Name: "Documentation Writer", Description: "Generates clear and comprehensive documentation"},
+		{Name: "Code Reviewer", Description: "Provides detailed code review feedback"},
+	}
+
 	// Reset to all agents if no search query
 	if p.agentSearchQuery == "" {
-		p.availableAgents = []AgentInfo{
-			{Name: "docs", Description: "Documentation assistant"},
-			{Name: "git-committer", Description: "Git commit message generator"},
-		}
+		p.availableAgents = allAgents
 	} else {
 		// Simple filtering based on name and description
-		allAgents := []AgentInfo{
-			{Name: "docs", Description: "Documentation assistant"},
-			{Name: "git-committer", Description: "Git commit message generator"},
-		}
-
 		p.availableAgents = []AgentInfo{}
 		query := strings.ToLower(p.agentSearchQuery)
 		for _, agent := range allAgents {
@@ -735,6 +753,7 @@ func (p *InputPanel) handleCompletionDialogKeys(msg tea.KeyMsg) (tea.Model, tea.
 // handleAgentDialogKeys handles keyboard input when agent selection dialog is active
 func (p *InputPanel) handleAgentDialogKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	keyStr := msg.String()
+	log.Printf("[AGENT_DIALOG] Key pressed: %q, availableAgents count: %d, selectedIdx: %d, scrollOffset: %d", keyStr, len(p.availableAgents), p.agentSelectedIdx, p.agentScrollOffset)
 
 	switch keyStr {
 	case "escape", "esc", "ctrl+c":
@@ -1097,6 +1116,7 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 			{Name: "Documentation Writer", Description: "Generates clear and comprehensive documentation"},
 			{Name: "Code Reviewer", Description: "Provides detailed code review feedback"},
 		}
+		log.Printf("[AGENT_DIALOG] /agents command executed - showAgentDialog: %v, mode: %s, availableAgents count: %d", p.showAgentDialog, p.mode, len(p.availableAgents))
 	case "/clear":
 		cmdToExecute = p.clearMessages()
 	case "/new":
@@ -2439,6 +2459,8 @@ func (p *InputPanel) renderModelDialog() string {
 
 func (p *InputPanel) renderAgentDialog() string {
 	var result strings.Builder
+
+	log.Printf("[AGENT_DIALOG] Rendering agent dialog - availableAgents count: %d, selectedIdx: %d, scrollOffset: %d, mode: %s", len(p.availableAgents), p.agentSelectedIdx, p.agentScrollOffset, p.mode)
 
 	// Calculate dialog dimensions
 	dialogWidth := min(p.width-4, 60)   // Leave margin and max width
