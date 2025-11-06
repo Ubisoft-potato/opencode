@@ -4,7 +4,7 @@ import { $ } from "bun"
 
 async function buildPanels() {
   // Build tmux orchestrator
-  await $`cd packages/tui/cmd/opencode-tmux && go build -o opencode-tmux main.go`
+  await $`cd packages/tui/cmd/opencode-tmux && mkdir -p dist && go build -o dist/opencode-tmux main.go`
   // Build sessions panel
   await $`cd packages/tui/cmd/opencode-sessions && mkdir -p dist && go build -o dist/sessions-pane main.go`
   // Build messages panel
@@ -63,7 +63,7 @@ async function startServer(): Promise<{ url: string; proc: ReturnType<typeof Bun
 async function startTmux(url: string) {
   // Inherit stdio so tmux attaches in the current terminal
   const tmux = Bun.spawn({
-    cmd: ["./opencode-tmux"],
+    cmd: ["./dist/opencode-tmux"],
     cwd: "packages/tui/cmd/opencode-tmux",
     stdout: "inherit",
     stderr: "inherit",

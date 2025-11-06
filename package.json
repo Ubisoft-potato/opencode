@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "bun run packages/opencode/src/index.ts",
     "dev:server-only": "bun run packages/opencode/src/index.ts serve",
-    "dev:tui-only": "(cd packages/tui/cmd/opencode-tmux && go build -o opencode-tmux main.go) && (cd packages/tui/cmd/opencode-sessions && go build -o dist/sessions-pane main.go) && (cd packages/tui/cmd/opencode-input && go build -o dist/input-pane main.go) && (cd packages/tui/cmd/opencode-tmux && OPENCODE_SERVER=http://127.0.0.1:62435 OPENCODE_SOCKET=/Users/hhx/.opencode/ipc.sock ./opencode-tmux)",
+    "dev:tui-only": "(cd packages/tui/cmd/opencode-tmux && mkdir -p dist && go build -o dist/opencode-tmux main.go) && (cd packages/tui/cmd/opencode-sessions && go build -o dist/sessions-pane main.go) && (cd packages/tui/cmd/opencode-input && go build -o dist/input-pane main.go) && (cd packages/tui/cmd/opencode-tmux && OPENCODE_SERVER=http://127.0.0.1:62435 OPENCODE_SOCKET=/Users/hhx/.opencode/ipc.sock ./dist/opencode-tmux)",
     "dev:tui": "bun run script/dev-tui.ts",
     "typecheck": "bun turbo typecheck",
     "prepare": "husky"

@@ -17,6 +17,7 @@ import (
 
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
+	tmuxconfig "github.com/sst/opencode/internal/config"
 	"github.com/sst/opencode/internal/ipc"
 	"github.com/sst/opencode/internal/persistence"
 	"github.com/sst/opencode/internal/state"
@@ -39,10 +40,12 @@ type TmuxOrchestrator struct {
 	serverOnly  bool
 	sseClient   *http.Client
 	serverURL   string
+	config      *tmuxconfig.File
+	panes       map[string]string
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
-func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool) *TmuxOrchestrator {
+func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool, cfg *tmuxconfig.File) *TmuxOrchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &TmuxOrchestrator{
@@ -56,6 +59,8 @@ func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, h
 		serverOnly:  serverOnly,
 		sseClient:   &http.Client{Timeout: 0}, // No timeout for SSE connections
 		serverURL:   serverURL,
+		config:      cfg,
+		panes:       map[string]string{},
 	}
 }
 
@@ -97,6 +102,15 @@ func (orch *TmuxOrchestrator) Initialize() error {
 // Start creates and configures the tmux session with panels
 func (orch *TmuxOrchestrator) Start() error {
 	log.Printf("Starting tmux session: %s", orch.sessionName)
+	if orch.config != nil {
+		name := strings.TrimSpace(orch.config.Session.Name)
+		if name != "" {
+			orch.sessionName = name
+			log.Printf("Session name overridden by config: %s", orch.sessionName)
+		}
+	}
+
+	orch.panes = map[string]string{}
 
 	// Check if tmux is available
 	if !orch.isTmuxAvailable() {
@@ -349,6 +363,13 @@ func (orch *TmuxOrchestrator) createTmuxSession() error {
 
 // configurePanels configures the tmux panel layout
 func (orch *TmuxOrchestrator) configurePanels() error {
+	if orch.config != nil {
+		return orch.configurePanelsFromConfig()
+	}
+	return orch.configureDefaultPanels()
+}
+
+func (orch *TmuxOrchestrator) configureDefaultPanels() error {
 	sessionTarget := orch.sessionName + ":0"
 
 	// Split window horizontally (sessions + messages)
@@ -376,11 +397,123 @@ func (orch *TmuxOrchestrator) configurePanels() error {
 		log.Printf("Warning: failed to resize input pane: %v", err)
 	}
 
+	orch.panes = map[string]string{
+		"sessions": sessionTarget + ".0",
+		"messages": sessionTarget + ".1",
+		"input":    sessionTarget + ".2",
+	}
+
 	return nil
+}
+
+func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
+	sessionTarget := orch.sessionName + ":0"
+	rootPane, err := orch.resolvePaneID(sessionTarget)
+	if err != nil {
+		return fmt.Errorf("failed to resolve root pane id: %w", err)
+	}
+	panes := map[string]string{
+		"root": rootPane,
+	}
+
+	for _, split := range orch.config.Splits {
+		target, ok := panes[split.Target]
+		if !ok {
+			return fmt.Errorf("unknown split target: %s", split.Target)
+		}
+
+		if len(split.Panels) != 2 {
+			return fmt.Errorf("split %s must define exactly two panels", split.Target)
+		}
+
+		args := []string{"split-window", "-P", "-F", "#{pane_id}", "-t", target}
+		typ := strings.ToLower(strings.TrimSpace(split.Type))
+		if typ == "horizontal" {
+			args = append(args, "-h")
+		}
+		if typ != "horizontal" {
+			args = append(args, "-v")
+		}
+
+		cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, args...)
+		out, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to split pane %s (%s): %w", split.Target, split.Type, err)
+		}
+
+		newPane := strings.TrimSpace(string(out))
+		first := split.Panels[0]
+		second := split.Panels[1]
+
+		panes[first] = target
+		panes[second] = newPane
+
+		if split.Ratio != "" {
+			firstPct, _, ok := orch.config.RatioPercents(split.Ratio)
+			if ok {
+				if typ == "horizontal" {
+					scale := fmt.Sprintf("%d%%", firstPct)
+					sizeCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", panes[first], "-x", scale)
+					if err := sizeCmd.Run(); err != nil {
+						log.Printf("Failed to apply horizontal ratio for %s: %v", first, err)
+					}
+				}
+				if typ != "horizontal" {
+					scale := fmt.Sprintf("%d%%", firstPct)
+					sizeCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", panes[first], "-y", scale)
+					if err := sizeCmd.Run(); err != nil {
+						log.Printf("Failed to apply vertical ratio for %s: %v", first, err)
+					}
+				}
+			}
+		}
+	}
+
+	for _, panel := range orch.config.Panels {
+		target, ok := panes[panel.ID]
+		if !ok {
+			continue
+		}
+
+		width := strings.TrimSpace(panel.Width)
+		if width != "" {
+			cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", target, "-x", width)
+			if err := cmd.Run(); err != nil {
+				log.Printf("Failed to apply width for %s: %v", panel.ID, err)
+			}
+		}
+
+		height := strings.TrimSpace(panel.Height)
+		if height != "" {
+			cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", target, "-y", height)
+			if err := cmd.Run(); err != nil {
+				log.Printf("Failed to apply height for %s: %v", panel.ID, err)
+			}
+		}
+	}
+
+	orch.panes = panes
+	return nil
+}
+
+func (orch *TmuxOrchestrator) resolvePaneID(target string) (string, error) {
+	cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "display-message", "-p", "-t", target, "#{pane_id}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // startPanelApplications starts the applications in each panel
 func (orch *TmuxOrchestrator) startPanelApplications() error {
+	if orch.config != nil {
+		return orch.startConfigPanelApplications()
+	}
+	return orch.startDefaultPanelApplications()
+}
+
+func (orch *TmuxOrchestrator) startDefaultPanelApplications() error {
 	sessionTarget := orch.sessionName + ":0"
 
 	// Set environment variables for all panels
@@ -429,6 +562,71 @@ func (orch *TmuxOrchestrator) startPanelApplications() error {
 	}
 }
 
+func (orch *TmuxOrchestrator) startConfigPanelApplications() error {
+	envVars := map[string]string{
+		"OPENCODE_SERVER": os.Getenv("OPENCODE_SERVER"),
+		"OPENCODE_SOCKET": orch.socketPath,
+	}
+
+	log.Printf("Starting panel applications with IPC socket: %s", orch.socketPath)
+	time.Sleep(1 * time.Second)
+
+	success := 0
+	for idx, panel := range orch.config.Panels {
+		target, ok := orch.panes[panel.ID]
+		if !ok {
+			log.Printf("Pane target for %s not found; skipping", panel.ID)
+			continue
+		}
+
+		appName, err := resolvePanelAppName(panel)
+		if err != nil {
+			log.Printf("Failed to resolve panel %s: %v", panel.ID, err)
+			continue
+		}
+
+		log.Printf("Starting %s panel (%d/%d)...", panel.ID, idx+1, len(orch.config.Panels))
+		if err := orch.startPanelApp(target, appName, envVars); err != nil {
+			log.Printf("Failed to start %s panel: %v", panel.ID, err)
+			continue
+		}
+
+		time.Sleep(500 * time.Millisecond)
+		log.Printf("✅ %s panel started successfully", panel.ID)
+		success++
+	}
+
+	if success == 0 {
+		return fmt.Errorf("no panels could be started successfully")
+	}
+
+	if orch.verifyPanelsRunning() {
+		log.Printf("Panel startup completed - %d panels requested", success)
+		return nil
+	}
+
+	return fmt.Errorf("panels failed health check after startup")
+}
+
+func resolvePanelAppName(panel tmuxconfig.Panel) (string, error) {
+	custom := strings.TrimSpace(panel.Command)
+	if custom != "" {
+		return custom, nil
+	}
+
+	key := strings.ToLower(strings.TrimSpace(panel.Type))
+	switch key {
+	case "sessions":
+		return "opencode-sessions", nil
+	case "messages":
+		return "opencode-messages", nil
+	case "input":
+		return "opencode-input", nil
+	}
+
+	return "", fmt.Errorf("unsupported panel type: %s", panel.Type)
+}
+
 // startPanelApp starts an application in a specific tmux pane
 func (orch *TmuxOrchestrator) startPanelApp(paneTarget, appName string, envVars map[string]string) error {
 	// Build command with environment variables
@@ -439,13 +637,19 @@ func (orch *TmuxOrchestrator) startPanelApp(paneTarget, appName string, envVars 
 		}
 	}
 
-	// Build correct binary path based on app name
+	run := strings.TrimSpace(appName)
 	binaryPath, err := orch.getBinaryPath(appName)
+	if err == nil {
+		run = binaryPath
+	}
 	if err != nil {
-		return fmt.Errorf("failed to get binary path for %s: %w", appName, err)
+		log.Printf("[DEBUG] Using raw command for %s: %v", appName, err)
+	}
+	if run == "" {
+		return fmt.Errorf("no command for panel %s", appName)
 	}
 
-	command := fmt.Sprintf("%s%s; sleep 600", envCmd, binaryPath)
+	command := fmt.Sprintf("%s%s; sleep 600", envCmd, run)
 
 	log.Printf("[DEBUG] Sending command to pane %s: %s", paneTarget, command)
 
@@ -476,6 +680,9 @@ func (orch *TmuxOrchestrator) getBinaryPath(appName string) (string, error) {
 	// Get the cmd directory (parent of opencode-tmux)
 	execDir := filepath.Dir(execPath)
 	cmdDir := filepath.Dir(execDir)
+	if filepath.Base(execDir) == "dist" {
+		cmdDir = filepath.Dir(cmdDir)
+	}
 
 	// Map app names to their binary paths
 	var binaryName string
@@ -501,25 +708,45 @@ func (orch *TmuxOrchestrator) getBinaryPath(appName string) (string, error) {
 
 // verifyPanelsRunning checks if panel applications are running
 func (orch *TmuxOrchestrator) verifyPanelsRunning() bool {
-	sessionTarget := orch.sessionName + ":0"
+	targets := []string{}
 
-	panelsRunning := 0
-	totalPanels := 3
-
-	for i := 0; i < totalPanels; i++ {
-		paneTarget := fmt.Sprintf("%s.%d", sessionTarget, i)
-
-		// Check if pane exists and is active
-		cmd := exec.Command(orch.tmuxCommand, "list-panes", "-t", paneTarget, "-F", "#{pane_pid}")
-		if output, err := cmd.Output(); err == nil && len(output) > 0 {
-			panelsRunning++
-			log.Printf("[DEBUG] Pane %d is active (PID: %s)", i, string(output)[:len(output)-1])
-		} else {
-			log.Printf("[DEBUG] Pane %d is not active or has no process", i)
+	if orch.config != nil {
+		seen := map[string]struct{}{}
+		for _, panel := range orch.config.Panels {
+			paneTarget, ok := orch.panes[panel.ID]
+			if !ok {
+				continue
+			}
+			if _, exists := seen[paneTarget]; exists {
+				continue
+			}
+			targets = append(targets, paneTarget)
+			seen[paneTarget] = struct{}{}
 		}
 	}
 
-	log.Printf("Panel verification: %d/%d panels are running", panelsRunning, totalPanels)
+	if len(targets) == 0 {
+		sessionTarget := orch.sessionName + ":0"
+		targets = []string{
+			sessionTarget + ".0",
+			sessionTarget + ".1",
+			sessionTarget + ".2",
+		}
+	}
+
+	panelsRunning := 0
+	for idx, paneTarget := range targets {
+		cmd := exec.Command(orch.tmuxCommand, "list-panes", "-t", paneTarget, "-F", "#{pane_pid}")
+		output, err := cmd.Output()
+		if err == nil && len(output) > 0 {
+			panelsRunning++
+			log.Printf("[DEBUG] Pane %s is active (PID: %s)", paneTarget, strings.TrimSpace(string(output)))
+			continue
+		}
+		log.Printf("[DEBUG] Pane %s (index %d) is not active or has no process", paneTarget, idx)
+	}
+
+	log.Printf("Panel verification: %d/%d panels are running", panelsRunning, len(targets))
 	return panelsRunning > 0
 }
 
@@ -645,8 +872,10 @@ func main() {
 	flag.Parse()
 
 	sessionName := "opencode"
+	sessionOverride := false
 	if flag.NArg() > 0 {
 		sessionName = flag.Arg(0)
+		sessionOverride = true
 	}
 
 	// Get configuration from environment
@@ -658,6 +887,22 @@ func main() {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatal("Failed to get home directory:", err)
+	}
+
+	configPath := os.Getenv("OPENCODE_TMUX_CONFIG")
+	if configPath == "" {
+		configPath = filepath.Join(homeDir, ".opencode", "tmux.yaml")
+	}
+
+	cfg, err := tmuxconfig.Load(configPath)
+	if err != nil {
+		log.Fatalf("Failed to load tmux config: %v", err)
+	}
+	if !sessionOverride {
+		name := strings.TrimSpace(cfg.Session.Name)
+		if name != "" {
+			sessionName = name
+		}
 	}
 
 	socketPath := os.Getenv("OPENCODE_SOCKET")
@@ -682,7 +927,7 @@ func main() {
 	}
 
 	// Create orchestrator
-	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly)
+	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly, cfg)
 
 	if serverOnly {
 		log.Printf("Starting in server-only mode - IPC server only, no panels")
