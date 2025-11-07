@@ -432,7 +432,7 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 	}
 
 	fmt.Printf("An existing tmux session has been detected: %s\n", orch.sessionName)
-	fmt.Printf("Choose an action: [r] Reuse an existing session (default) / [n] Create and overwrite / [q] Exit: ")
+	fmt.Printf("Choose an action: [r] Reuse an existing session (default) / [n] Create new session/ [q] Exit: ")
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -472,9 +472,7 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 
 			return nil
 		case "q", "quit":
-			log.Printf("User chose to exit")
-			os.Exit(0)
-			return nil
+			return fmt.Errorf("user cancels startup")
 		default:
 			fmt.Printf("Invalid input, please enter. r / n / q: ")
 		}

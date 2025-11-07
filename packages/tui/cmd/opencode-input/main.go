@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -78,34 +79,32 @@ func (p *InputPanel) agentListCapacities() (int, int) {
 
 // filterAgents filters available agents based on search query
 func (p *InputPanel) filterAgents() {
-	// Get all available agents
-	allAgents := []AgentInfo{
-		{Name: "Code Assistant", Description: "General purpose coding assistant"},
-		{Name: "Debug Expert", Description: "Specialized in debugging and troubleshooting"},
-		{Name: "Architecture Advisor", Description: "Helps with system design and architecture"},
-		{Name: "Performance Optimizer", Description: "Focuses on code optimization and performance"},
-		{Name: "Security Auditor", Description: "Reviews code for security vulnerabilities"},
-		{Name: "Test Generator", Description: "Creates comprehensive test suites"},
-		{Name: "Documentation Writer", Description: "Generates clear and comprehensive documentation"},
-		{Name: "Code Reviewer", Description: "Provides detailed code review feedback"},
+	if len(p.allAgents) == 0 {
+		p.availableAgents = nil
+		p.agentSelectedIdx = 0
+		return
 	}
 
-	// Reset to all agents if no search query
-	if p.agentSearchQuery == "" {
-		p.availableAgents = allAgents
-	} else {
-		// Simple filtering based on name and description
-		p.availableAgents = []AgentInfo{}
+	agents := make([]AgentInfo, 0, len(p.allAgents))
+	if p.agentSearchQuery != "" {
 		query := strings.ToLower(p.agentSearchQuery)
-		for _, agent := range allAgents {
-			if strings.Contains(strings.ToLower(agent.Name), query) ||
-				strings.Contains(strings.ToLower(agent.Description), query) {
-				p.availableAgents = append(p.availableAgents, agent)
+		for _, agent := range p.allAgents {
+			name := strings.ToLower(agent.Name)
+			if strings.Contains(name, query) {
+				agents = append(agents, agent)
+				continue
+			}
+			desc := strings.ToLower(agent.Description)
+			if strings.Contains(desc, query) {
+				agents = append(agents, agent)
 			}
 		}
 	}
+	if p.agentSearchQuery == "" {
+		agents = append(agents, p.allAgents...)
+	}
 
-	// Reset selection if out of bounds
+	p.availableAgents = agents
 	if p.agentSelectedIdx >= len(p.availableAgents) {
 		p.agentSelectedIdx = 0
 	}
@@ -151,12 +150,14 @@ type InputPanel struct {
 	modelSelectedIdx  int         // Currently selected model index
 	modelScrollOffset int         // Current scroll offset in model list
 	availableModels   []ModelInfo // Available models for selection
+	allModels         []ModelInfo // Cached models fetched from API
 	// Agent selection state
 	showAgentDialog   bool        // Whether agent selection dialog is visible
 	agentSearchQuery  string      // Current search query in agent dialog
 	agentSelectedIdx  int         // Currently selected agent index
 	agentScrollOffset int         // Current scroll offset in agent list
 	availableAgents   []AgentInfo // Available agents for selection
+	allAgents         []AgentInfo // Cached agents fetched from API
 	// Command completion dialog state
 	showCompletionDialog   bool     // Whether command completion dialog is visible
 	completionCommands     []string // Available commands for completion
@@ -415,6 +416,24 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return nil
 			}
 		}
+		return p, nil
+
+	case ModelsLoadedMsg:
+		p.allModels = msg.Models
+		p.modelSelectedIdx = 0
+		p.modelScrollOffset = 0
+		p.filterModels()
+		p.updateModelScrollOffset()
+		log.Printf("[MODEL_DIALOG] Models loaded: %d available", len(p.availableModels))
+		return p, nil
+
+	case AgentsLoadedMsg:
+		p.allAgents = msg.Agents
+		p.agentSelectedIdx = 0
+		p.agentScrollOffset = 0
+		p.filterAgents()
+		p.updateAgentScrollOffset()
+		log.Printf("[AGENT_DIALOG] Agents loaded: %d available", len(p.availableAgents))
 		return p, nil
 
 	case InputEventMsg:
@@ -1101,45 +1120,11 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 
 	switch cmd {
 	case "/help":
-		// 显示内置帮助视图，而不是发送无处渲染的 InfoMsg
 		p.showHelp = true
 	case "/models":
-		// 显示模型选择对话框
-		p.showModelDialog = true
-		p.mode = "model_select"
-		p.modelSearchQuery = ""
-		p.modelSelectedIdx = 0
-		// 初始化可用模型列表（这里使用示例数据，实际应该从API获取）
-		p.availableModels = []ModelInfo{
-			{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
-			{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
-			{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
-			{Provider: "OpenCode Zen", Model: "claude-3-5-sonnet", Name: "Claude 3.5 Sonnet"},
-			{Provider: "OpenCode Zen", Model: "gpt-4o", Name: "GPT-4o"},
-			{Provider: "OpenCode Zen", Model: "gpt-4o-mini", Name: "GPT-4o Mini"},
-			{Provider: "OpenCode Zen", Model: "gemini-pro", Name: "Gemini Pro"},
-			{Provider: "OpenCode Zen", Model: "llama-3-70b", Name: "Llama 3 70B"},
-			{Provider: "OpenCode Zen", Model: "mistral-large", Name: "Mistral Large"},
-			{Provider: "OpenCode Zen", Model: "codestral", Name: "Codestral"},
-		}
+		cmdToExecute = p.openModelDialog()
 	case "/agents":
-		// 显示代理选择对话框
-		p.showAgentDialog = true
-		p.mode = "agent_select"
-		p.agentSearchQuery = ""
-		p.agentSelectedIdx = 0
-		// 初始化可用代理列表（这里使用示例数据，实际应该从API获取）
-		p.availableAgents = []AgentInfo{
-			{Name: "Code Assistant", Description: "General purpose coding assistant"},
-			{Name: "Debug Expert", Description: "Specialized in debugging and troubleshooting"},
-			{Name: "Architecture Advisor", Description: "Helps with system design and architecture"},
-			{Name: "Performance Optimizer", Description: "Focuses on code optimization and performance"},
-			{Name: "Security Auditor", Description: "Reviews code for security vulnerabilities"},
-			{Name: "Test Generator", Description: "Creates comprehensive test suites"},
-			{Name: "Documentation Writer", Description: "Generates clear and comprehensive documentation"},
-			{Name: "Code Reviewer", Description: "Provides detailed code review feedback"},
-		}
-		log.Printf("[AGENT_DIALOG] /agents command executed - showAgentDialog: %v, mode: %s, availableAgents count: %d", p.showAgentDialog, p.mode, len(p.availableAgents))
+		cmdToExecute = p.openAgentDialog()
 	case "/clear":
 		cmdToExecute = p.clearMessages()
 	case "/new":
@@ -1156,14 +1141,6 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 		if len(args) > 0 {
 			cmdToExecute = p.changeTheme(args[0])
 		}
-	case "/model":
-		if len(args) > 1 {
-			cmdToExecute = p.changeModel(args[0], args[1])
-		}
-	case "/agent":
-		if len(args) > 0 {
-			cmdToExecute = p.changeAgent(args[0])
-		}
 	case "/compact":
 		cmdToExecute = p.compactCurrentSession()
 	}
@@ -1174,6 +1151,135 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	}
 
 	return p, p.syncInputState()
+}
+
+func (p *InputPanel) openModelDialog() tea.Cmd {
+	p.showModelDialog = true
+	p.mode = "model_select"
+	p.modelSearchQuery = ""
+	p.modelSelectedIdx = 0
+	p.modelScrollOffset = 0
+	p.availableModels = nil
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		resp, err := p.client.App.Providers(ctx, opencode.AppProvidersParams{})
+		if err != nil {
+			return ErrorMsg{Error: fmt.Errorf("failed to load models: %w", err)}
+		}
+
+		if resp == nil {
+			return ErrorMsg{Error: errors.New("no models available")}
+		}
+
+		models := make([]ModelInfo, 0, len(resp.Providers))
+		seen := map[string]struct{}{}
+
+		for _, provider := range resp.Providers {
+			for id, model := range provider.Models {
+				key := provider.ID + "/" + id
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				name := strings.TrimSpace(model.Name)
+				if name == "" {
+					name = id
+				}
+				models = append(models, ModelInfo{
+					Provider: provider.ID,
+					Model:    id,
+					Name:     name,
+				})
+				seen[key] = struct{}{}
+			}
+		}
+
+		for providerID, modelID := range resp.Default {
+			if providerID == "" || modelID == "" {
+				continue
+			}
+			key := providerID + "/" + modelID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			models = append(models, ModelInfo{
+				Provider: providerID,
+				Model:    modelID,
+				Name:     modelID,
+			})
+			seen[key] = struct{}{}
+		}
+
+		if len(models) == 0 {
+			return ErrorMsg{Error: errors.New("no models available")}
+		}
+
+		sort.Slice(models, func(i, j int) bool {
+			if models[i].Provider == models[j].Provider {
+				if models[i].Name == models[j].Name {
+					return models[i].Model < models[j].Model
+				}
+				return models[i].Name < models[j].Name
+			}
+			return models[i].Provider < models[j].Provider
+		})
+
+		log.Printf("[MODEL_DIALOG] Loaded %d models from API", len(models))
+		return ModelsLoadedMsg{Models: models}
+	}
+}
+
+func (p *InputPanel) openAgentDialog() tea.Cmd {
+	p.showAgentDialog = true
+	p.mode = "agent_select"
+	p.agentSearchQuery = ""
+	p.agentSelectedIdx = 0
+	p.agentScrollOffset = 0
+	p.availableAgents = nil
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		res, err := p.client.Agent.List(ctx, opencode.AgentListParams{})
+		if err != nil {
+			return ErrorMsg{Error: fmt.Errorf("failed to load agents: %w", err)}
+		}
+
+		if res == nil {
+			return ErrorMsg{Error: errors.New("no agents available")}
+		}
+
+		agents := make([]AgentInfo, 0, len(*res))
+		for _, agent := range *res {
+			desc := strings.TrimSpace(agent.Description)
+			if desc == "" {
+				desc = string(agent.Mode)
+			}
+			agents = append(agents, AgentInfo{
+				Name:        agent.Name,
+				Description: desc,
+			})
+		}
+
+		if len(agents) == 0 {
+			return ErrorMsg{Error: errors.New("no agents available")}
+		}
+
+		sort.Slice(agents, func(i, j int) bool {
+			left := strings.ToLower(agents[i].Name)
+			right := strings.ToLower(agents[j].Name)
+			if left == right {
+				return strings.ToLower(agents[i].Description) < strings.ToLower(agents[j].Description)
+			}
+			return left < right
+		})
+
+		log.Printf("[AGENT_DIALOG] Loaded %d agents from API", len(agents))
+		return AgentsLoadedMsg{Agents: agents}
+	}
 }
 
 // sendMessage sends the current buffer as a message
@@ -1408,39 +1514,43 @@ func (p *InputPanel) handleUIActionTriggered(event types.StateEvent) error {
 
 				// Handle open_models action by showing model selection dialog
 				if action == "open_models" {
-					p.showModelDialog = true
-					p.mode = "model_select"
-					p.modelSearchQuery = ""
-					p.modelSelectedIdx = 0
-					// Initialize with some mock models for now
-					p.availableModels = []ModelInfo{
-						{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
-						{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
-						{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
-					}
-
-					// Trigger UI update
+					cmd := p.openModelDialog()
 					if p.program != nil {
 						p.program.Send(InfoMsg{Message: "Model selection dialog opened"})
+					}
+					if cmd != nil {
+						go func() {
+							msg := cmd()
+							if msg == nil {
+								return
+							}
+							if p.program != nil {
+								p.program.Send(msg)
+								return
+							}
+							log.Printf("[MODEL_DIALOG] Dropped message because program is nil: %#v", msg)
+						}()
 					}
 				}
 
 				// Handle open_agents action by showing agent selection dialog
 				if action == "open_agents" {
-					p.showAgentDialog = true
-					p.mode = "agent_select"
-					p.agentSearchQuery = ""
-					p.agentSelectedIdx = 0
-					// Initialize with some mock agents for now
-					p.availableAgents = []AgentInfo{
-						{Name: "Code Assistant", Description: "General purpose coding assistant"},
-						{Name: "Debug Helper", Description: "Specialized in debugging and troubleshooting"},
-						{Name: "Documentation Writer", Description: "Helps with writing documentation"},
-					}
-
-					// Trigger UI update
+					cmd := p.openAgentDialog()
 					if p.program != nil {
 						p.program.Send(InfoMsg{Message: "Agent selection dialog opened"})
+					}
+					if cmd != nil {
+						go func() {
+							msg := cmd()
+							if msg == nil {
+								return
+							}
+							if p.program != nil {
+								p.program.Send(msg)
+								return
+							}
+							log.Printf("[AGENT_DIALOG] Dropped message because program is nil: %#v", msg)
+						}()
 					}
 				}
 
@@ -2109,32 +2219,38 @@ func (p *InputPanel) updateModelScrollOffset() {
 
 // filterModels filters available models based on search query
 func (p *InputPanel) filterModels() {
-	// Reset to all models if no search query
-	if p.modelSearchQuery == "" {
-		p.availableModels = []ModelInfo{
-			{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
-			{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
-			{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
-		}
-	} else {
-		// Simple filtering based on name
-		allModels := []ModelInfo{
-			{Provider: "OpenCode Zen", Model: "grok-code-fast-1", Name: "Grok Code Fast 1"},
-			{Provider: "OpenCode Zen", Model: "big-pickle", Name: "Big Pickle"},
-			{Provider: "OpenCode Zen", Model: "code-supernova-1m", Name: "Code Supernova 1M"},
-		}
+	if len(p.allModels) == 0 {
+		p.availableModels = nil
+		p.modelSelectedIdx = 0
+		return
+	}
 
-		p.availableModels = []ModelInfo{}
+	models := make([]ModelInfo, 0, len(p.allModels))
+	if p.modelSearchQuery != "" {
 		query := strings.ToLower(p.modelSearchQuery)
-		for _, model := range allModels {
-			if strings.Contains(strings.ToLower(model.Name), query) ||
-				strings.Contains(strings.ToLower(model.Model), query) {
-				p.availableModels = append(p.availableModels, model)
+		for _, model := range p.allModels {
+			name := strings.ToLower(strings.TrimSpace(model.Name))
+			if name == "" {
+				name = strings.ToLower(model.Model)
+			}
+			if strings.Contains(name, query) {
+				models = append(models, model)
+				continue
+			}
+			if strings.Contains(strings.ToLower(model.Model), query) {
+				models = append(models, model)
+				continue
+			}
+			if strings.Contains(strings.ToLower(model.Provider), query) {
+				models = append(models, model)
 			}
 		}
 	}
+	if p.modelSearchQuery == "" {
+		models = append(models, p.allModels...)
+	}
 
-	// Reset selection if out of bounds
+	p.availableModels = models
 	if p.modelSelectedIdx >= len(p.availableModels) {
 		p.modelSelectedIdx = 0
 	}
@@ -3058,6 +3174,14 @@ type TitleUpdatedMsg struct {
 
 type PreloadCompletedMsg struct {
 	SessionCount int
+}
+
+type ModelsLoadedMsg struct {
+	Models []ModelInfo
+}
+
+type AgentsLoadedMsg struct {
+	Agents []AgentInfo
 }
 
 type SessionSyncMsg struct {
