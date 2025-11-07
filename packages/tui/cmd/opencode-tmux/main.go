@@ -577,6 +577,37 @@ func (orch *TmuxOrchestrator) resolvePaneID(target string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+func (orch *TmuxOrchestrator) handleSessionCompactedEvent(sessionID string) error {
+	log.Printf("[SSE] Session compacted: %s", sessionID)
+
+	data := make(map[string]interface{})
+	if sessionID != "" {
+		data["session_id"] = sessionID
+	}
+
+	if err := orch.triggerUIAction("refresh_messages", data); err != nil {
+		return fmt.Errorf("failed to trigger messages refresh: %w", err)
+	}
+
+	return nil
+}
+
+func (orch *TmuxOrchestrator) triggerUIAction(action string, data map[string]interface{}) error {
+	update := types.StateUpdate{
+		ID:              fmt.Sprintf("ui_action_%s_%d", action, time.Now().UnixNano()),
+		Type:            types.UIActionTriggered,
+		ExpectedVersion: orch.syncManager.GetState().GetCurrentVersion(),
+		Payload: types.UIActionPayload{
+			Action: action,
+			Data:   data,
+		},
+		SourcePanel: "tmux-orchestrator",
+		Timestamp:   time.Now(),
+	}
+
+	return orch.syncManager.UpdateWithVersionCheck(update)
+}
+
 // startPanelApplications starts the applications in each panel
 func (orch *TmuxOrchestrator) startPanelApplications() error {
 	if orch.config != nil {
@@ -1236,6 +1267,16 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
 			}
 		} else {
 			log.Printf("[SSE] Unexpected union type for message.removed")
+		}
+
+	case opencode.EventListResponseTypeSessionCompacted:
+		uni := evt.AsUnion()
+		if v, ok := uni.(opencode.EventListResponseEventSessionCompacted); ok {
+			if err := orch.handleSessionCompactedEvent(v.Properties.SessionID); err != nil {
+				log.Printf("[SSE] Failed to process session.compacted event: %v", err)
+			}
+		} else {
+			log.Printf("[SSE] Unexpected union type for session.compacted")
 		}
 
 	case opencode.EventListResponseTypeSessionDeleted:

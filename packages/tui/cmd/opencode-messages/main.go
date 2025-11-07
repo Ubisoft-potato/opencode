@@ -208,6 +208,10 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_, cmd := p.handleMessageEvent(msg.Event)
 		return p, tea.Batch(cmd, p.subscribeEvents())
 
+	case MessagesRefreshedMsg:
+		p.applyRefreshedMessages(msg.Messages)
+		return p, nil
+
 	case StreamingUpdateMsg:
 		return p.handleStreamingUpdate(msg)
 
@@ -462,6 +466,29 @@ func (p *MessagesPanel) refreshMessages() tea.Cmd {
 
 		return MessagesRefreshedMsg{Messages: messageInfos}
 	}
+}
+
+func (p *MessagesPanel) applyRefreshedMessages(messages []types.MessageInfo) {
+	p.messages = messages
+
+	mode := "plain"
+	if p.markdownMode {
+		mode = "markdown"
+	}
+
+	p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+	p.lineRenderer.cleanupCache()
+
+	if p.autoScroll {
+		p.scrollToBottom()
+	} else {
+		maxScroll := p.calculateMaxScroll()
+		if p.scrollOffset > maxScroll {
+			p.scrollOffset = maxScroll
+		}
+	}
+
+	log.Printf("[MESSAGES] Applied refreshed messages, total=%d", len(p.messages))
 }
 
 // startEventStream starts listening for streaming events
@@ -783,14 +810,13 @@ func (p *MessagesPanel) handleThemeChanged(event state.StateEvent) error {
 func (p *MessagesPanel) handleUIActionTriggered(event state.StateEvent) error {
 	log.Printf("[MESSAGES] Received UI action triggered event: %+v", event)
 
-	// Extract action from the event payload
 	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
 		if actionRaw, exists := payloadMap["action"]; exists {
 			if action, ok := actionRaw.(string); ok {
 				log.Printf("[MESSAGES] UI action: %s", action)
-				// Messages panel doesn't need to handle modal dialogs directly
-				// These are typically handled by other panels or the main TUI
-				// Just log for now
+				if action == "refresh_messages" {
+					return p.forwardEventToUI(event)
+				}
 				return nil
 			}
 		}
@@ -820,7 +846,8 @@ func decodePayload[T any](data map[string]interface{}, out *T) error {
 }
 
 func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, tea.Cmd) {
-	var needsRefresh bool
+	var cmds []tea.Cmd
+	needsRefresh := false
 
 	switch event.Type {
 	case state.EventMessageAdded:
@@ -844,16 +871,66 @@ func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, t
 	case types.EventThemeChanged:
 		p.handleThemeChanged(event)
 		needsRefresh = true
+	case types.EventUIActionTriggered:
+		if cmd := p.handleUIActionEvent(event); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
-	// Force a UI refresh by returning a no-op command that triggers a re-render
 	if needsRefresh {
-		return p, tea.Tick(time.Millisecond, func(time.Time) tea.Msg {
+		cmds = append(cmds, tea.Tick(time.Millisecond, func(time.Time) tea.Msg {
 			return RefreshTickMsg{}
-		})
+		}))
 	}
 
-	return p, nil
+	if len(cmds) == 0 {
+		return p, nil
+	}
+
+	return p, tea.Batch(cmds...)
+}
+
+func (p *MessagesPanel) handleUIActionEvent(event state.StateEvent) tea.Cmd {
+	payloadMap, ok := event.Data.(map[string]interface{})
+	if !ok {
+		log.Printf("[MESSAGES] UI action payload missing")
+		return nil
+	}
+
+	actionRaw, hasAction := payloadMap["action"]
+	if !hasAction {
+		log.Printf("[MESSAGES] UI action payload missing action field")
+		return nil
+	}
+
+	action, ok := actionRaw.(string)
+	if !ok {
+		log.Printf("[MESSAGES] UI action action field not string")
+		return nil
+	}
+
+	switch strings.ToLower(action) {
+	case "refresh_messages":
+		targetSession := ""
+		if dataRaw, ok := payloadMap["data"].(map[string]interface{}); ok {
+			if sessionRaw, ok := dataRaw["session_id"]; ok {
+				if sessionID, ok := sessionRaw.(string); ok {
+					targetSession = sessionID
+				}
+			}
+		}
+
+		if targetSession != "" && targetSession != p.currentSessionID {
+			log.Printf("[MESSAGES] Refresh requested for session %s but current session is %s, skipping", targetSession, p.currentSessionID)
+			return nil
+		}
+
+		log.Printf("[MESSAGES] Triggering refresh due to UI action (session=%s)", targetSession)
+		return p.refreshMessages()
+	default:
+		log.Printf("[MESSAGES] Unhandled UI action: %s", action)
+		return nil
+	}
 }
 
 // forwardEventToUI bridges IPC events into Bubble Tea by pushing into eventsChan

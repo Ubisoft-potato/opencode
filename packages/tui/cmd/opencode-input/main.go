@@ -1141,6 +1141,8 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 		if len(args) > 0 {
 			cmdToExecute = p.changeAgent(args[0])
 		}
+	case "/summarize", "/compact":
+		cmdToExecute = p.compactCurrentSession()
 	}
 
 	// Combine input state sync with the command execution
@@ -1725,6 +1727,186 @@ func (p *InputPanel) changeAgent(agent string) tea.Cmd {
 
 		return InfoMsg{Message: fmt.Sprintf("Agent changed to %s", agent)}
 	}
+}
+
+func (p *InputPanel) compactCurrentSession() tea.Cmd {
+	sessionID := p.currentSessionID
+	if sessionID == "" {
+		return func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("no session selected")}
+		}
+	}
+
+	provider, model, err := p.resolveProviderAndModel()
+	if err != nil {
+		return func() tea.Msg {
+			return ErrorMsg{Error: err}
+		}
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		_, apiErr := p.client.Session.Summarize(
+			ctx,
+			sessionID,
+			opencode.SessionSummarizeParams{
+				ProviderID: opencode.F(provider),
+				ModelID:    opencode.F(model),
+			},
+		)
+		if apiErr != nil {
+			return ErrorMsg{Error: fmt.Errorf("failed to compact session: %w", apiErr)}
+		}
+
+		return InfoMsg{Message: "Session compact request sent"}
+	}
+}
+
+func (p *InputPanel) resolveProviderAndModel() (string, string, error) {
+	if p.cachedState != nil && p.cachedState.Provider != "" && p.cachedState.Model != "" {
+		return p.cachedState.Provider, p.cachedState.Model, nil
+	}
+
+	state, err := p.ipcClient.RequestState()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to fetch application state: %w", err)
+	}
+
+	p.cachedState = state
+
+	if provider := strings.TrimSpace(state.Provider); provider != "" && strings.TrimSpace(state.Model) != "" {
+		return state.Provider, state.Model, nil
+	}
+
+	provider, model, err := p.determineProviderAndModel(state)
+	if err != nil {
+		return "", "", err
+	}
+
+	p.cachedState.Provider = provider
+	p.cachedState.Model = model
+	if p.cachedState.AgentModel == nil {
+		p.cachedState.AgentModel = map[string]string{}
+	}
+	if state.Agent != "" {
+		p.cachedState.AgentModel[state.Agent] = provider + "/" + model
+	}
+
+	return provider, model, nil
+}
+
+func (p *InputPanel) determineProviderAndModel(state *types.SharedApplicationState) (string, string, error) {
+	if state.AgentModel != nil {
+		if entry, ok := state.AgentModel[state.Agent]; ok && entry != "" {
+			if provider, model := splitProviderModel(entry); provider != "" && model != "" {
+				return provider, model, nil
+			}
+		}
+	}
+
+	if provider, model, err := p.resolveProviderFromAgents(state); err == nil && provider != "" && model != "" {
+		return provider, model, nil
+	}
+
+	return p.resolveProviderFromProviders()
+}
+
+func (p *InputPanel) resolveProviderFromAgents(state *types.SharedApplicationState) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	agents, err := p.client.Agent.List(ctx, opencode.AgentListParams{})
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load agents: %w", err)
+	}
+
+	if agents == nil || len(*agents) == 0 {
+		return "", "", fmt.Errorf("no agents available")
+	}
+
+	targetName := state.Agent
+	var selected opencode.Agent
+	found := false
+
+	if targetName != "" {
+		for _, agent := range *agents {
+			if strings.EqualFold(agent.Name, targetName) {
+				selected = agent
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		// Prefer first primary agent
+		for _, agent := range *agents {
+			if agent.Mode != opencode.AgentModeSubagent {
+				selected = agent
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		selected = (*agents)[0]
+	}
+
+	provider := selected.Model.ProviderID
+	model := selected.Model.ModelID
+
+	if provider == "" || model == "" {
+		if entry, ok := state.AgentModel[selected.Name]; ok && entry != "" {
+			provider, model = splitProviderModel(entry)
+		}
+	}
+
+	if provider == "" || model == "" {
+		return "", "", fmt.Errorf("agent does not specify provider/model")
+	}
+
+	return provider, model, nil
+}
+
+func (p *InputPanel) resolveProviderFromProviders() (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	resp, err := p.client.App.Providers(ctx, opencode.AppProvidersParams{})
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load providers: %w", err)
+	}
+
+	for providerID, modelID := range resp.Default {
+		if providerID != "" && modelID != "" {
+			return providerID, modelID, nil
+		}
+	}
+
+	for _, provider := range resp.Providers {
+		for modelID := range provider.Models {
+			if modelID != "" {
+				return provider.ID, modelID, nil
+			}
+		}
+	}
+
+	return "", "", fmt.Errorf("no providers or models available")
+}
+
+func splitProviderModel(entry string) (string, string) {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return "", ""
+	}
+	if strings.Contains(entry, "/") {
+		parts := strings.SplitN(entry, "/", 2)
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return "", strings.TrimSpace(entry)
 }
 
 // cycleTheme cycles through comfortable themes
