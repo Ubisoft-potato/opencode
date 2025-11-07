@@ -36,7 +36,7 @@ type RenderedLine struct {
 	IsFirstLine     bool   `json:"is_first_line"`
 	IsLastLine      bool   `json:"is_last_line"`
 	IsSeparator     bool   `json:"is_separator"`     // Line used for spacing between messages
-	NeedsBackground bool   `json:"needs_background"` // Line needs background color (for user messages)
+	NeedsBackground bool   `json:"needs_background"` // Line needs background color accent
 	BackgroundWidth int    `json:"background_width"` // Calculated width for background rendering
 }
 
@@ -1502,23 +1502,11 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 	}
 
 	if mode == "markdown" {
-		// Set background color based on message type
-		var backgroundColor compat.AdaptiveColor
-		if message.Type == "user" {
-			// User messages use light gray background with black text for better readability
-			backgroundColor = compat.AdaptiveColor{
-				Light: lipgloss.Color("#f5f5f5"), // Light gray background for light mode
-				Dark:  lipgloss.Color("#f5f5f5"), // Light gray background for dark mode too
-			}
-		} else {
-			// Other messages use transparent background for code blocks
-			backgroundColor = compat.AdaptiveColor{
-				Light: lipgloss.NoColor{},
-				Dark:  lipgloss.NoColor{},
-			}
+		backgroundColor := compat.AdaptiveColor{
+			Light: lipgloss.NoColor{},
+			Dark:  lipgloss.NoColor{},
 		}
 
-		// Render the message content as markdown
 		renderedContent = util.ToMarkdown(message.Content, width-len(prefix)-4, backgroundColor)
 
 		// Split into lines and add prefix
@@ -1538,14 +1526,6 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 				finalLine = fmt.Sprintf("[%s] %s", timestamp, finalLine)
 			}
 
-			// Calculate background width for user messages
-			backgroundWidth := 0
-			if message.Type == "user" {
-				// Use more generous width calculation for better coverage
-				// Take 90% of available width with reasonable minimum
-				backgroundWidth = max(width*9/10, 60)
-			}
-
 			lines = append(lines, RenderedLine{
 				Content:         finalLine,
 				MessageID:       message.ID,
@@ -1554,8 +1534,8 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 				IsFirstLine:     i == 0,
 				IsLastLine:      i == len(contentLines)-1,
 				IsSeparator:     false,
-				NeedsBackground: message.Type == "user", // User messages get background
-				BackgroundWidth: backgroundWidth,
+				NeedsBackground: false,
+				BackgroundWidth: 0,
 			})
 		}
 	} else {
@@ -1575,14 +1555,6 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 
 		contentLines := strings.Split(content, "\n")
 		for i, line := range contentLines {
-			// Calculate background width for user messages
-			backgroundWidth := 0
-			if message.Type == "user" {
-				// Use more generous width calculation for better coverage
-				// Take 90% of available width with reasonable minimum
-				backgroundWidth = max(width*9/10, 60)
-			}
-
 			lines = append(lines, RenderedLine{
 				Content:         line,
 				MessageID:       message.ID,
@@ -1591,8 +1563,8 @@ func (lr *LineBasedRenderer) renderMessageToLines(message types.MessageInfo, wid
 				IsFirstLine:     i == 0,
 				IsLastLine:      i == len(contentLines)-1,
 				IsSeparator:     false,
-				NeedsBackground: message.Type == "user", // User messages get background
-				BackgroundWidth: backgroundWidth,
+				NeedsBackground: false,
+				BackgroundWidth: 0,
 			})
 		}
 	}
