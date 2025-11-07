@@ -1283,27 +1283,33 @@ func (p *InputPanel) openAgentDialog() tea.Cmd {
 
 // sendMessage sends the current buffer as a message
 func (p *InputPanel) sendMessage() tea.Cmd {
-	if p.currentSessionID == "" {
-		return func() tea.Msg {
-			return ErrorMsg{Error: fmt.Errorf("no session selected")}
-		}
-	}
-
 	message := strings.TrimSpace(p.buffer)
 	if message == "" {
 		return nil
 	}
 
+	if p.currentSessionID != "" {
+		return p.makeSendCommand(message, p.currentSessionID)
+	}
+
+	if p.cachedState != nil && len(p.cachedState.Sessions) > 0 {
+		return func() tea.Msg {
+			return ErrorMsg{Error: fmt.Errorf("no session selected")}
+		}
+	}
+
+	return p.createSessionAndSend(message)
+}
+
+func (p *InputPanel) makeSendCommand(message, sessionID string) tea.Cmd {
 	return func() tea.Msg {
-		// Add to history
 		p.addToHistory(message)
 
-		// Perform API call in background so UI remains responsive
-		go func(sessionID, userMsg string) {
+		go func(session, userMsg string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			response, err := p.client.Session.Prompt(ctx, sessionID, opencode.SessionPromptParams{
+			response, err := p.client.Session.Prompt(ctx, session, opencode.SessionPromptParams{
 				Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
 					opencode.TextPartInputParam{
 						Text: opencode.F(userMsg),
@@ -1319,21 +1325,79 @@ func (p *InputPanel) sendMessage() tea.Cmd {
 
 			log.Printf("[INPUT] Successfully sent message to OpenCode API, response received")
 
-			// Create assistant message from response
-			if response != nil {
-				// Check for errors in the response
-				if response.Info.Error.Name != "" {
-					log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
-					return
-				}
-
-				// Do not add assistant message from input panel.
-				// The SSE orchestrator will add and stream-update messages to avoid duplicates.
+			if response == nil {
+				return
 			}
-		}(p.currentSessionID, message)
 
-		// Immediately clear input buffer in UI
+			if response.Info.Error.Name != "" {
+				log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
+			}
+		}(sessionID, message)
+
 		return MessageSentMsg{}
+	}
+}
+
+func (p *InputPanel) createSessionAndSend(message string) tea.Cmd {
+	return func() tea.Msg {
+		title := fmt.Sprintf("New Session %s", time.Now().Format("15:04:05"))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		session, err := p.client.Session.New(ctx, opencode.SessionNewParams{
+			Title: opencode.F(title),
+		})
+		if err != nil {
+			log.Printf("[INPUT] Failed to create session before sending message: %v", err)
+			return ErrorMsg{Error: fmt.Errorf("failed to create session: %w", err)}
+		}
+
+		info := types.SessionInfo{
+			ID:           session.ID,
+			Title:        session.Title,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+			MessageCount: 0,
+			IsActive:     true,
+		}
+
+		update := types.StateUpdate{
+			Type: types.SessionAdded,
+			Payload: types.SessionAddPayload{
+				Session: info,
+			},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+		}
+
+		_, err = p.sendUpdateWithRetry(update)
+		if err != nil {
+			log.Printf("[INPUT] Failed to send session state update: %v", err)
+			return ErrorMsg{Error: err}
+		}
+
+		if p.cachedState != nil {
+			p.cachedState.Sessions = append(p.cachedState.Sessions, info)
+			p.cachedState.CurrentSessionID = session.ID
+		}
+
+		change := types.StateUpdate{
+			Type:        types.SessionChanged,
+			Payload:     types.SessionChangePayload{SessionID: session.ID},
+			SourcePanel: "input-panel",
+			Timestamp:   time.Now(),
+		}
+
+		_, err = p.sendUpdateWithRetry(change)
+		if err != nil {
+			log.Printf("[INPUT] Failed to broadcast session change: %v", err)
+		}
+
+		p.currentSessionID = session.ID
+		p.currentSessionTitle = session.Title
+
+		return p.makeSendCommand(message, session.ID)()
 	}
 }
 
