@@ -186,17 +186,21 @@ func (fm *FileManager) acquireFileLock() error {
 		}
 	}
 
-	// Retry loop for stale lock handling
-	for attempts := 0; attempts < 3; attempts++ {
+	start := time.Now()
+	for {
 		// Create lock file
 		lockFile, err := os.OpenFile(fm.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			if os.IsExist(err) {
-				// Lock file exists, check if it's stale
 				if err := fm.handleStaleLock(); err != nil {
-					return err
+					if _, ok := err.(*LockTimeoutError); !ok {
+						return err
+					}
 				}
-				// If handleStaleLock returned nil, the stale lock was removed, retry
+				if time.Since(start) >= fm.lockTimeout {
+					return &LockTimeoutError{Path: fm.lockPath, Timeout: fm.lockTimeout}
+				}
+				time.Sleep(50 * time.Millisecond)
 				continue
 			}
 			return fmt.Errorf("failed to create lock file: %w", err)
@@ -213,14 +217,17 @@ func (fm *FileManager) acquireFileLock() error {
 		if err := fm.flockFile(lockFile); err != nil {
 			lockFile.Close()
 			os.Remove(fm.lockPath)
-			return fmt.Errorf("failed to flock file: %w", err)
+			if time.Since(start) >= fm.lockTimeout {
+				return &LockTimeoutError{Path: fm.lockPath, Timeout: fm.lockTimeout}
+			}
+			// Another process may still hold the lock; wait and retry.
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
 
 		fm.fileLock = lockFile
 		return nil
 	}
-
-	return fmt.Errorf("failed to acquire lock after multiple attempts")
 }
 
 // releaseFileLock releases the file lock

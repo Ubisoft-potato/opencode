@@ -116,9 +116,6 @@ func (orch *TmuxOrchestrator) Start() error {
 
 	orch.panes = map[string]string{}
 
-	if err := orch.handleExistingSession(); err != nil {
-		return err
-	}
 	if orch.reuseExisting {
 		orch.isRunning = true
 		log.Printf("Reusing existing tmux session without reconfiguration")
@@ -417,7 +414,11 @@ func (orch *TmuxOrchestrator) configureDefaultPanels() error {
 	return nil
 }
 
-func (orch *TmuxOrchestrator) handleExistingSession() error {
+func (orch *TmuxOrchestrator) prepareExistingSession() error {
+	if orch.serverOnly {
+		return nil
+	}
+
 	cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", orch.sessionName)
 	if err := cmd.Run(); err != nil {
 		return nil
@@ -425,10 +426,16 @@ func (orch *TmuxOrchestrator) handleExistingSession() error {
 
 	if !isTerminal() {
 		log.Printf("Existing tmux session detected but stdin is not a terminal, creating new session")
-		return orch.killTmuxSession()
+		if err := orch.killTmuxSession(); err != nil {
+			return err
+		}
+		if err := orch.purgeServerSessions(); err != nil {
+			return fmt.Errorf("failed to purge server sessions: %w", err)
+		}
+		return orch.clearLocalStateFiles()
 	}
 
-	fmt.Printf("An existing tmux session has been detected. %s\n", orch.sessionName)
+	fmt.Printf("An existing tmux session has been detected: %s\n", orch.sessionName)
 	fmt.Printf("Choose an action: [r] Reuse an existing session (default) / [n] Create and overwrite / [q] Exit: ")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -452,8 +459,11 @@ func (orch *TmuxOrchestrator) handleExistingSession() error {
 			if err := orch.killTmuxSession(); err != nil {
 				return err
 			}
-			if err := orch.resetPersistentState(); err != nil {
-				return fmt.Errorf("failed to reset persistent state: %w", err)
+			if err := orch.purgeServerSessions(); err != nil {
+				return fmt.Errorf("failed to purge server sessions: %w", err)
+			}
+			if err := orch.clearLocalStateFiles(); err != nil {
+				return fmt.Errorf("failed to clear local state files: %w", err)
 			}
 			return nil
 		case "q", "quit":
@@ -862,11 +872,34 @@ func (orch *TmuxOrchestrator) killTmuxSession() error {
 	return nil
 }
 
-func (orch *TmuxOrchestrator) resetPersistentState() error {
-	if orch.syncManager != nil {
-		if err := orch.syncManager.ResetState(); err != nil {
-			return err
+func (orch *TmuxOrchestrator) clearLocalStateFiles() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to resolve home directory: %w", err)
+	}
+
+	opencodeDir := filepath.Join(homeDir, ".opencode")
+	stateFiles := []string{
+		filepath.Join(opencodeDir, "state.json"),
+		filepath.Join(opencodeDir, "state.json.lock"),
+	}
+	for _, file := range stateFiles {
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove %s: %w", file, err)
 		}
+	}
+
+	backups, err := filepath.Glob(filepath.Join(opencodeDir, "state.json.backup*"))
+	if err == nil {
+		for _, backup := range backups {
+			if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("failed to remove %s: %w", backup, err)
+			}
+		}
+	}
+
+	if err := os.RemoveAll(filepath.Join(opencodeDir, "tmp")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to clear tmp directory: %w", err)
 	}
 
 	storageRoot, err := resolveStorageRoot()
@@ -877,12 +910,41 @@ func (orch *TmuxOrchestrator) resetPersistentState() error {
 	targets := []string{"message", "part", "session", "share"}
 	for _, name := range targets {
 		path := filepath.Join(storageRoot, name)
-		if err := os.RemoveAll(path); err != nil {
+		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to clear %s: %w", path, err)
 		}
 		if err := os.MkdirAll(path, 0755); err != nil {
 			return fmt.Errorf("failed to recreate %s: %w", path, err)
 		}
+	}
+
+	return nil
+}
+
+func (orch *TmuxOrchestrator) purgeServerSessions() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	sessions, err := orch.httpClient.Session.List(ctx, opencode.SessionListParams{})
+	if err != nil {
+		return fmt.Errorf("failed to list sessions: %w", err)
+	}
+
+	if sessions == nil || len(*sessions) == 0 {
+		log.Printf("No existing sessions found on server to purge")
+		return nil
+	}
+
+	log.Printf("Purging %d sessions from opencode server", len(*sessions))
+
+	for _, session := range *sessions {
+		delCtx, delCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, delErr := orch.httpClient.Session.Delete(delCtx, session.ID, opencode.SessionDeleteParams{})
+		delCancel()
+		if delErr != nil {
+			return fmt.Errorf("failed to delete session %s: %w", session.ID, delErr)
+		}
+		log.Printf("Deleted server session: %s (%s)", session.Title, session.ID)
 	}
 
 	return nil
@@ -1103,6 +1165,10 @@ func main() {
 
 	// Create orchestrator
 	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly, cfg)
+
+	if err := orchestrator.prepareExistingSession(); err != nil {
+		log.Fatal(err)
+	}
 
 	if serverOnly {
 		log.Printf("Starting in server-only mode - IPC server only, no panels")
