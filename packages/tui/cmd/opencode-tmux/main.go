@@ -472,7 +472,9 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 
 			return nil
 		case "q", "quit":
-			return fmt.Errorf("user cancels startup")
+			log.Printf("User chose to exit")
+			os.Exit(0)
+			return nil
 		default:
 			fmt.Printf("Invalid input, please enter. r / n / q: ")
 		}
@@ -1677,6 +1679,68 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 	log.Printf("[INIT] Final state after loading: CurrentSessionID=%s, Sessions=%d, Messages=%d",
 		finalState.CurrentSessionID, len(finalState.Sessions), len(finalState.Messages))
 
+	// Prompt user to create session if none exist (only in terminal mode)
+	if len(finalState.Sessions) == 0 && isTerminal() {
+		if err := orch.promptCreateFirstSession(); err != nil {
+			log.Printf("Session creation prompt returned error: %v", err)
+			// Don't fail - user can create session later in the TUI
+		}
+	}
+
+	return nil
+}
+
+// promptCreateFirstSession prompts the user to create a session if none exist
+func (orch *TmuxOrchestrator) promptCreateFirstSession() error {
+	fmt.Println("\n📋 No sessions found.")
+	fmt.Print("Would you like to create a new session now? [Y/n]: ")
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("failed to read user input: %w", err)
+	}
+
+	choice := strings.ToLower(strings.TrimSpace(line))
+	// Default to 'y' if user just presses Enter
+	if choice == "" || choice == "y" || choice == "yes" {
+		fmt.Println("Creating new session...")
+
+		// Create session via API
+		ctx, cancel := context.WithTimeout(orch.ctx, 10*time.Second)
+		defer cancel()
+
+		session, err := orch.httpClient.Session.New(ctx, opencode.SessionNewParams{})
+		if err != nil {
+			return fmt.Errorf("failed to create session: %w", err)
+		}
+
+		fmt.Printf("✓ Session created: %s\n\n", session.Title)
+		log.Printf("Created initial session: %s (ID: %s)", session.Title, session.ID)
+
+		// Add to state
+		sessionInfo := types.SessionInfo{
+			ID:           session.ID,
+			Title:        session.Title,
+			CreatedAt:    parseServerTime(session.Time.Created),
+			UpdatedAt:    parseServerTime(session.Time.Updated),
+			MessageCount: 0,
+			IsActive:     true,
+		}
+
+		if err := orch.syncManager.AddSession(sessionInfo, "startup-prompt"); err != nil {
+			log.Printf("Warning: Failed to add session to state: %v", err)
+		}
+
+		// Set as current session
+		if err := orch.syncManager.UpdateSessionSelection(session.ID, "startup-prompt"); err != nil {
+			log.Printf("Warning: Failed to set current session: %v", err)
+		}
+
+		return nil
+	}
+
+	fmt.Println("Skipping session creation. You can create one later in the TUI.")
 	return nil
 }
 

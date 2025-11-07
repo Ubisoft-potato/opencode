@@ -136,7 +136,7 @@ func (p *SessionsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrorMsg:
 		errorText := fmt.Sprintf("%v", msg.Error)
 		log.Printf("Sessions panel error: %s", errorText)
-		p.lastError = errorText
+			p.lastError = errorText
 		p.isCreatingSession = false
 		return p, nil
 

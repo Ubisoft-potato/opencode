@@ -119,8 +119,6 @@ This creates a four-panel layout with sessions list, messages, input, and an int
 
 ## Notes
 
-- Missing panels or invalid references are ignored during layout creation.
-- Custom `command` entries run as-is inside tmux after the environment variables are exported.
-- Set `OPENCODE_SERVER` before launching the orchestrator; the loader forwards it to all panes automatically.
+
 - The `shell` type uses your `$SHELL` environment variable (defaults to `/bin/bash` if not set).
 - Shell panels are independent from OpenCode panels and can be used for general terminal operations.
