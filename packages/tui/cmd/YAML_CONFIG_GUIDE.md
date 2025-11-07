@@ -14,17 +14,16 @@ session:
 panels:
   - id: "sessions"
     type: "sessions"
-    width: "22%"
   - id: "messages"
     type: "messages"
   - id: "input"
     type: "input"
-    height: "20%"
 
 splits:
   - type: "horizontal"
     target: "root"
     panels: ["sessions", "messages"]
+    ratio: "1:4"
   - type: "vertical"
     target: "messages"
     panels: ["messages", "input"]
@@ -34,21 +33,47 @@ splits:
 ### Fields
 
 - `session.name` – overrides the tmux session name unless provided on the command line.
-- `panels` – describes each pane. `type` accepts `sessions`, `messages`, `input`. `width` and `height` accept tmux-friendly values (e.g. `80`, `20%`). `command` (optional) runs a custom program instead of a built-in panel.
+- `panels` – describes each pane. Each panel requires:
+  - `id`: unique identifier for the panel
+  - `type`: panel type, accepts `sessions`, `messages`, `input`
+  - `command`: (optional) custom command to run in this pane instead of default panel app
 - `splits` – defines how panes are split (first ID stays on the original pane, second ID becomes the newly created pane):
-  - `type`: `horizontal` (left/right) or `vertical` (top/bottom).
-  - `target`: identifier of the pane to split. `root` refers to the initial window.
-  - `panels`: two panel IDs; the first reuses the existing pane, the second becomes the newly created pane.
-  - `ratio`: optional `A:B` string to size the first pane relative to the second (e.g. `4:1` keeps the first pane at ~80%).
+  - `type`: `horizontal` (left/right) or `vertical` (top/bottom)
+  - `target`: identifier of the pane to split. `root` refers to the initial window
+  - `panels`: two panel IDs; the first reuses the existing pane, the second becomes the newly created pane
+  - `ratio`: (optional) `A:B` format to control pane sizes relative to each other (e.g. `1:4` makes the first pane 20% and second pane 80%; `4:1` makes the first pane 80% and second pane 20%)
 
 ## Defaults
 
-If the YAML file is missing or empty, the orchestrator falls back to the classic layout:
+If the YAML file is missing or empty, the orchestrator uses the following default configuration:
 
-1. Horizontal split of `root` into `sessions` (left) and `messages` (right).
-2. Vertical split of `messages` into `messages` (top) and `input` (bottom).
+```yaml
+version: "1.0"
+mode: "raw"
 
-Widths and heights default to `20%` for the side (`sessions`) and bottom (`input`) panes.
+session:
+  name: "opencode"
+
+panels:
+  - id: "sessions"
+    type: "sessions"
+  - id: "messages"
+    type: "messages"
+  - id: "input"
+    type: "input"
+
+splits:
+  - type: "horizontal"
+    target: "root"
+    panels: ["sessions", "messages"]
+  - type: "vertical"
+    target: "messages"
+    panels: ["messages", "input"]
+```
+
+This creates a classic three-panel layout:
+1. Horizontal split of `root` into `sessions` (left, 20%) and `messages` (right, 80%)
+2. Vertical split of `messages` into `messages` (top, 80%) and `input` (bottom, 20%)
 
 ## Notes
 

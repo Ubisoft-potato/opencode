@@ -345,6 +345,11 @@ func (server *SocketServer) handleStateRequest(clientConn *ClientConnection, mes
 		return
 	}
 
+	// Log state details for debugging
+	log.Printf("[IPC] State request from panel %s (%s): CurrentSessionID=%s, Sessions=%d, Messages=%d",
+		clientConn.PanelID, clientConn.PanelType, currentState.CurrentSessionID,
+		len(currentState.Sessions), len(currentState.Messages))
+
 	response := IPCMessage{
 		Type:      "state_response",
 		RequestID: message.RequestID,

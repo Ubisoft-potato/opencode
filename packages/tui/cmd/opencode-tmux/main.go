@@ -429,10 +429,6 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 		if err := orch.killTmuxSession(); err != nil {
 			return err
 		}
-		if err := orch.purgeServerSessions(); err != nil {
-			return fmt.Errorf("failed to purge server sessions: %w", err)
-		}
-		return orch.clearLocalStateFiles()
 	}
 
 	fmt.Printf("An existing tmux session has been detected: %s\n", orch.sessionName)
@@ -443,7 +439,7 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
-			return fmt.Errorf("读取用户输入失败: %w", err)
+			return fmt.Errorf("failed to read user input: %w", err)
 		}
 		choice := strings.ToLower(strings.TrimSpace(line))
 		if choice == "" {
@@ -459,17 +455,26 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 			if err := orch.killTmuxSession(); err != nil {
 				return err
 			}
-			if err := orch.purgeServerSessions(); err != nil {
-				return fmt.Errorf("failed to purge server sessions: %w", err)
+
+			// Clean state file to ensure fresh start with proper session selection
+			if err := os.Remove(orch.statePath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Warning: failed to remove state file %s: %v", orch.statePath, err)
+			} else if err == nil {
+				log.Printf("State file cleared for fresh start: %s", orch.statePath)
 			}
-			if err := orch.clearLocalStateFiles(); err != nil {
-				return fmt.Errorf("failed to clear local state files: %w", err)
+
+			// Clean socket file to prevent connection issues
+			if err := os.Remove(orch.socketPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Warning: failed to remove socket file %s: %v", orch.socketPath, err)
+			} else if err == nil {
+				log.Printf("Socket file cleared: %s", orch.socketPath)
 			}
+
 			return nil
 		case "q", "quit":
-			return fmt.Errorf("用户取消启动")
+			return fmt.Errorf("user cancels startup")
 		default:
-			fmt.Printf("输入无效，请输入 r / n / q: ")
+			fmt.Printf("Invalid input, please enter. r / n / q: ")
 		}
 	}
 }
@@ -872,83 +877,6 @@ func (orch *TmuxOrchestrator) killTmuxSession() error {
 	return nil
 }
 
-func (orch *TmuxOrchestrator) clearLocalStateFiles() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to resolve home directory: %w", err)
-	}
-
-	opencodeDir := filepath.Join(homeDir, ".opencode")
-	stateFiles := []string{
-		filepath.Join(opencodeDir, "state.json"),
-		filepath.Join(opencodeDir, "state.json.lock"),
-	}
-	for _, file := range stateFiles {
-		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove %s: %w", file, err)
-		}
-	}
-
-	backups, err := filepath.Glob(filepath.Join(opencodeDir, "state.json.backup*"))
-	if err == nil {
-		for _, backup := range backups {
-			if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("failed to remove %s: %w", backup, err)
-			}
-		}
-	}
-
-	if err := os.RemoveAll(filepath.Join(opencodeDir, "tmp")); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to clear tmp directory: %w", err)
-	}
-
-	storageRoot, err := resolveStorageRoot()
-	if err != nil {
-		return err
-	}
-
-	targets := []string{"message", "part", "session", "share"}
-	for _, name := range targets {
-		path := filepath.Join(storageRoot, name)
-		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to clear %s: %w", path, err)
-		}
-		if err := os.MkdirAll(path, 0755); err != nil {
-			return fmt.Errorf("failed to recreate %s: %w", path, err)
-		}
-	}
-
-	return nil
-}
-
-func (orch *TmuxOrchestrator) purgeServerSessions() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	sessions, err := orch.httpClient.Session.List(ctx, opencode.SessionListParams{})
-	if err != nil {
-		return fmt.Errorf("failed to list sessions: %w", err)
-	}
-
-	if sessions == nil || len(*sessions) == 0 {
-		log.Printf("No existing sessions found on server to purge")
-		return nil
-	}
-
-	log.Printf("Purging %d sessions from opencode server", len(*sessions))
-
-	for _, session := range *sessions {
-		delCtx, delCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_, delErr := orch.httpClient.Session.Delete(delCtx, session.ID, opencode.SessionDeleteParams{})
-		delCancel()
-		if delErr != nil {
-			return fmt.Errorf("failed to delete session %s: %w", session.ID, delErr)
-		}
-		log.Printf("Deleted server session: %s (%s)", session.Title, session.ID)
-	}
-
-	return nil
-}
 
 // attachToSession attaches to the tmux session
 func (orch *TmuxOrchestrator) attachToSession() error {
@@ -1705,43 +1633,43 @@ func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
 		}
 	}
 
-	// If no current session selected, choose the first one for consistency
+	// Ensure CurrentSessionID is valid
 	st := orch.syncManager.GetState()
 	if len(st.Sessions) > 0 {
-		ensureValid := false
-		if st.CurrentSessionID == "" {
-			ensureValid = true
-		} else {
-			// Verify current selection exists in loaded sessions
-			found := false
+		validSessionID := ""
+
+		// Prefer existing CurrentSessionID if it exists in loaded sessions
+		if st.CurrentSessionID != "" {
 			for _, s := range st.Sessions {
 				if s.ID == st.CurrentSessionID {
-					found = true
+					validSessionID = st.CurrentSessionID
+					log.Printf("Keeping existing session selection: %s", validSessionID)
 					break
 				}
 			}
-			ensureValid = !found
 		}
 
-		if ensureValid {
-			first := st.Sessions[0].ID
-			if err := orch.syncManager.UpdateSessionSelection(first, "server-sync"); err != nil {
-				log.Printf("Warning: failed to set valid session selection: %v", err)
+		// If current ID is invalid or empty, select the first session
+		if validSessionID == "" {
+			validSessionID = st.Sessions[0].ID
+			log.Printf("Setting session to first available: %s", validSessionID)
+
+			if err := orch.syncManager.UpdateSessionSelection(validSessionID, "server-sync"); err != nil {
+				log.Printf("Warning: failed to set session selection: %v", err)
 			} else {
-				log.Printf("Selected valid session: %s", first)
+				log.Printf("Successfully set CurrentSessionID: %s", validSessionID)
 			}
 		}
-	}
-	if st.CurrentSessionID == "" && len(st.Sessions) > 0 {
-		first := st.Sessions[0].ID
-		if err := orch.syncManager.UpdateSessionSelection(first, "server-sync"); err != nil {
-			log.Printf("Warning: failed to set default session selection: %v", err)
-		} else {
-			log.Printf("Default session selected: %s", first)
-		}
+	} else {
+		log.Printf("No sessions loaded from server, CurrentSessionID will remain empty")
 	}
 
+	// Log final state for debugging
+	finalState := orch.syncManager.GetState()
 	log.Printf("Successfully loaded %d sessions from server", len(*sessions))
+	log.Printf("[INIT] Final state after loading: CurrentSessionID=%s, Sessions=%d, Messages=%d",
+		finalState.CurrentSessionID, len(finalState.Sessions), len(finalState.Messages))
+
 	return nil
 }
 

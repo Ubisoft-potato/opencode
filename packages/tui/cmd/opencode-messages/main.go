@@ -186,6 +186,11 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StateLoadedMsg:
 		p.currentSessionID = msg.State.CurrentSessionID
 		p.messages = p.filterMessagesForSession(msg.State.Messages, p.currentSessionID)
+
+		// Log state details for debugging
+		log.Printf("[MESSAGES] State loaded: CurrentSessionID=%s, Total messages=%d, Filtered messages=%d",
+			msg.State.CurrentSessionID, len(msg.State.Messages), len(p.messages))
+
 		if p.autoScroll {
 			p.scrollToBottom()
 		}
