@@ -428,8 +428,8 @@ func (orch *TmuxOrchestrator) handleExistingSession() error {
 		return orch.killTmuxSession()
 	}
 
-	fmt.Printf("检测到已有 tmux 会话: %s\n", orch.sessionName)
-	fmt.Printf("选择操作: [r] 复用现有会话 (默认) / [n] 新建并覆盖 / [q] 退出: ")
+	fmt.Printf("An existing tmux session has been detected. %s\n", orch.sessionName)
+	fmt.Printf("Choose an action: [r] Reuse an existing session (default) / [n] Create and overwrite / [q] Exit: ")
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -449,7 +449,13 @@ func (orch *TmuxOrchestrator) handleExistingSession() error {
 			return nil
 		case "n", "new":
 			log.Printf("User requested new tmux session, killing existing session: %s", orch.sessionName)
-			return orch.killTmuxSession()
+			if err := orch.killTmuxSession(); err != nil {
+				return err
+			}
+			if err := orch.resetPersistentState(); err != nil {
+				return fmt.Errorf("failed to reset persistent state: %w", err)
+			}
+			return nil
 		case "q", "quit":
 			return fmt.Errorf("用户取消启动")
 		default:
@@ -856,6 +862,32 @@ func (orch *TmuxOrchestrator) killTmuxSession() error {
 	return nil
 }
 
+func (orch *TmuxOrchestrator) resetPersistentState() error {
+	if orch.syncManager != nil {
+		if err := orch.syncManager.ResetState(); err != nil {
+			return err
+		}
+	}
+
+	storageRoot, err := resolveStorageRoot()
+	if err != nil {
+		return err
+	}
+
+	targets := []string{"message", "part", "session", "share"}
+	for _, name := range targets {
+		path := filepath.Join(storageRoot, name)
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("failed to clear %s: %w", path, err)
+		}
+		if err := os.MkdirAll(path, 0755); err != nil {
+			return fmt.Errorf("failed to recreate %s: %w", path, err)
+		}
+	}
+
+	return nil
+}
+
 // attachToSession attaches to the tmux session
 func (orch *TmuxOrchestrator) attachToSession() error {
 	if !orch.isRunning {
@@ -916,6 +948,17 @@ func (orch *TmuxOrchestrator) performHealthCheck() {
 func (orch *TmuxOrchestrator) isTmuxSessionRunning() bool {
 	cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", orch.sessionName)
 	return cmd.Run() == nil
+}
+
+func resolveStorageRoot() (string, error) {
+	if base := os.Getenv("XDG_DATA_HOME"); base != "" {
+		return filepath.Join(base, "opencode", "storage"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share", "opencode", "storage"), nil
 }
 
 func (orch *TmuxOrchestrator) resizePane(target string, axis string, value string) error {

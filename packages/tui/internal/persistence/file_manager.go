@@ -16,13 +16,13 @@ import (
 // FileManager handles atomic file operations for state persistence
 // Implements the interfaces.StateRepository interface
 type FileManager struct {
-	statePath     string
-	lockPath      string
-	backupPath    string
-	tempDir       string
-	lockTimeout   time.Duration
-	fileLock      *os.File
-	lockMutex     sync.Mutex
+	statePath          string
+	lockPath           string
+	backupPath         string
+	tempDir            string
+	lockTimeout        time.Duration
+	fileLock           *os.File
+	lockMutex          sync.Mutex
 	compressionEnabled bool
 	backupRotation     int
 }
@@ -54,10 +54,10 @@ func NewFileManager(config FileManagerConfig) *FileManager {
 		statePath:          config.StatePath,
 		lockPath:           config.StatePath + ".lock",
 		backupPath:         config.StatePath + ".backup",
-		tempDir:           config.TempDir,
-		lockTimeout:       config.LockTimeout,
+		tempDir:            config.TempDir,
+		lockTimeout:        config.LockTimeout,
 		compressionEnabled: config.CompressionEnabled,
-		backupRotation:    config.BackupRotation,
+		backupRotation:     config.BackupRotation,
 	}
 }
 
@@ -175,7 +175,15 @@ func (fm *FileManager) acquireFileLock() error {
 	defer fm.lockMutex.Unlock()
 
 	if fm.fileLock != nil {
-		return fmt.Errorf("lock already held")
+		deadline := time.Now().Add(fm.lockTimeout)
+		for fm.fileLock != nil && time.Now().Before(deadline) {
+			fm.lockMutex.Unlock()
+			time.Sleep(50 * time.Millisecond)
+			fm.lockMutex.Lock()
+		}
+		if fm.fileLock != nil {
+			return fmt.Errorf("lock already held")
+		}
 	}
 
 	// Retry loop for stale lock handling
@@ -243,6 +251,9 @@ func (fm *FileManager) handleStaleLock() error {
 	// Check lock file age
 	stat, err := os.Stat(fm.lockPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -501,7 +512,6 @@ type StateMetadata struct {
 	Timestamp time.Time `json:"timestamp"`
 	Checksum  string    `json:"checksum"`
 }
-
 
 // Error types
 

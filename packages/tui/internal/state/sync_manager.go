@@ -571,6 +571,33 @@ func (manager *PanelSyncManager) SaveStateSync() error {
 	return manager.saveStateSync()
 }
 
+// ResetState replaces the current state with a fresh instance and persists it.
+func (manager *PanelSyncManager) ResetState() error {
+	manager.syncMutex.Lock()
+	manager.state = types.NewSharedApplicationState()
+	manager.syncMutex.Unlock()
+
+	if err := manager.saveStateSync(); err != nil {
+		return fmt.Errorf("failed to persist reset state: %w", err)
+	}
+
+	manager.syncMutex.RLock()
+	stateClone := manager.state.Clone()
+	manager.syncMutex.RUnlock()
+
+	event := types.StateEvent{
+		ID:          generateEventID(),
+		Type:        types.EventStateSync,
+		Data:        types.StateSyncPayload{State: stateClone},
+		Version:     stateClone.Version.Version,
+		SourcePanel: "system",
+		Timestamp:   time.Now(),
+	}
+
+	manager.eventBus.Broadcast(event)
+	return nil
+}
+
 // saveStateSync performs synchronous state saving
 func (manager *PanelSyncManager) saveStateSync() error {
 	manager.syncMutex.RLock()
