@@ -173,8 +173,8 @@ var completionSuggestions = []string{
 	"agents",
 	"clear",
 	"agent",
-	"share",
-	"unshare",
+	// "share",
+	// "unshare",
 	"compact",
 }
 
