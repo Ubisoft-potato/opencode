@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -1548,12 +1550,22 @@ func (p *InputPanel) clearMessages() tea.Cmd {
 		defer cancel()
 
 		// First, delete messages from backend
-		if _, err := p.client.Session.ClearMessages(ctx, p.currentSessionID); err != nil {
+		response, err := p.client.Session.ClearMessages(ctx, p.currentSessionID)
+		if err != nil {
 			log.Printf("[INPUT] Failed to clear messages from backend: %v", err)
 			return ErrorMsg{Error: fmt.Errorf("failed to clear messages: %w", err)}
 		}
 
-		log.Printf("[INPUT] Successfully cleared messages from backend for session %s", p.currentSessionID)
+		cleared := int64(0)
+		if response != nil {
+			cleared = response.Count
+		}
+
+		log.Printf("[INPUT] Successfully cleared %d messages from backend for session %s", cleared, p.currentSessionID)
+
+		if err := purgeLocalSessionMessages(p.currentSessionID); err != nil {
+			log.Printf("[INPUT] Failed to purge local messages for session %s: %v", p.currentSessionID, err)
+		}
 
 		// Then, send clear messages request via IPC to update local state
 		if err := p.ipcClient.SendClearSessionMessages(p.currentSessionID); err != nil {
@@ -3061,6 +3073,49 @@ type SessionUpdatedMsg struct {
 type ClipboardReadMsg struct {
 	Content string
 	Error   error
+}
+
+func purgeLocalSessionMessages(sessionID string) error {
+	root, err := resolveStorageRoot()
+	if err != nil {
+		return err
+	}
+
+	sessionDir := filepath.Join(root, "message", sessionID)
+	entries, err := os.ReadDir(sessionDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		if name == "" {
+			continue
+		}
+		partDir := filepath.Join(root, "part", name)
+		if removeErr := os.RemoveAll(partDir); removeErr != nil {
+			log.Printf("[INPUT] Failed to remove message part directory %s: %v", partDir, removeErr)
+		}
+	}
+
+	return os.RemoveAll(sessionDir)
+}
+
+func resolveStorageRoot() (string, error) {
+	if base := os.Getenv("XDG_DATA_HOME"); base != "" {
+		return filepath.Join(base, "opencode", "storage"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share", "opencode", "storage"), nil
 }
 
 func (p *InputPanel) readClipboard() tea.Cmd {

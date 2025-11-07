@@ -399,14 +399,12 @@ func (orch *TmuxOrchestrator) configureDefaultPanels() error {
 
 	// Adjust pane sizes
 	// Sessions panel: 20% width
-	cmd = exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", sessionTarget+".0", "-x", "20%")
-	if err := cmd.Run(); err != nil {
+	if err := orch.resizePane(sessionTarget+".0", "x", "20%"); err != nil {
 		log.Printf("Warning: failed to resize sessions pane: %v", err)
 	}
 
 	// Input panel: 20% height
-	cmd = exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", sessionTarget+".2", "-y", "20%")
-	if err := cmd.Run(); err != nil {
+	if err := orch.resizePane(sessionTarget+".2", "y", "20%"); err != nil {
 		log.Printf("Warning: failed to resize input pane: %v", err)
 	}
 
@@ -549,16 +547,14 @@ func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 
 		width := strings.TrimSpace(panel.Width)
 		if width != "" && (lock == nil || !lock.lockX) {
-			cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", target, "-x", width)
-			if err := cmd.Run(); err != nil {
+			if err := orch.resizePane(target, "x", width); err != nil {
 				log.Printf("Failed to apply width for %s: %v", panel.ID, err)
 			}
 		}
 
 		height := strings.TrimSpace(panel.Height)
 		if height != "" && (lock == nil || !lock.lockY) {
-			cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "resize-pane", "-t", target, "-y", height)
-			if err := cmd.Run(); err != nil {
+			if err := orch.resizePane(target, "y", height); err != nil {
 				log.Printf("Failed to apply height for %s: %v", panel.ID, err)
 			}
 		}
@@ -920,6 +916,39 @@ func (orch *TmuxOrchestrator) performHealthCheck() {
 func (orch *TmuxOrchestrator) isTmuxSessionRunning() bool {
 	cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", orch.sessionName)
 	return cmd.Run() == nil
+}
+
+func (orch *TmuxOrchestrator) resizePane(target string, axis string, value string) error {
+	val := strings.TrimSpace(value)
+	if val == "" {
+		return nil
+	}
+
+	args := []string{"resize-pane", "-t", target}
+
+	if strings.HasSuffix(val, "%") {
+		pct := strings.TrimSuffix(val, "%")
+		pct = strings.TrimSpace(pct)
+		if pct == "" {
+			return fmt.Errorf("invalid percentage pane size: %q", value)
+		}
+		args = append(args, "-p", pct)
+		cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, args...)
+		return cmd.Run()
+	}
+
+	if axis == "x" {
+		args = append(args, "-x", val)
+	}
+	if axis == "y" {
+		args = append(args, "-y", val)
+	}
+	if len(args) != 4 {
+		return fmt.Errorf("invalid axis for resize-pane: %q", axis)
+	}
+
+	cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, args...)
+	return cmd.Run()
 }
 
 // printStatus prints the current status of the orchestrator
