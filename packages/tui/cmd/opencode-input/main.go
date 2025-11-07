@@ -1544,9 +1544,11 @@ func (p *InputPanel) clearMessages() tea.Cmd {
 
 		log.Printf("[INPUT] Clearing messages for session %s", p.currentSessionID)
 
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
 		// First, delete messages from backend
-		_, err := p.client.Session.ClearMessages(p.ctx, p.currentSessionID)
-		if err != nil {
+		if _, err := p.client.Session.ClearMessages(ctx, p.currentSessionID); err != nil {
 			log.Printf("[INPUT] Failed to clear messages from backend: %v", err)
 			return ErrorMsg{Error: fmt.Errorf("failed to clear messages: %w", err)}
 		}
@@ -1560,6 +1562,31 @@ func (p *InputPanel) clearMessages() tea.Cmd {
 		}
 
 		log.Printf("[INPUT] Successfully cleared messages for session %s", p.currentSessionID)
+
+		// Ensure we have the latest state after clearing
+		sessionID := p.currentSessionID
+		if currentState, err := p.ipcClient.RequestState(); err == nil && currentState != nil {
+			p.cachedState = currentState
+			if currentState.CurrentSessionID != "" {
+				p.currentSessionID = currentState.CurrentSessionID
+			} else {
+				p.currentSessionID = sessionID
+			}
+		} else {
+			p.currentSessionID = sessionID
+		}
+
+		// Reset input-related UI state
+		p.buffer = ""
+		p.cursorPosition = 0
+		p.selectionStart = 0
+		p.selectionEnd = 0
+		p.mode = "normal"
+		p.showCompletionDialog = false
+		p.completionCommands = nil
+		p.completionSelectedIdx = 0
+		p.completionScrollOffset = 0
+
 		return InfoMsg{Message: "Messages cleared"}
 	}
 }
