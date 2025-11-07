@@ -742,6 +742,13 @@ func resolvePanelAppName(panel tmuxconfig.Panel) (string, error) {
 		return "opencode-messages", nil
 	case "input":
 		return "opencode-input", nil
+	case "shell":
+		// For shell type, return the user's default shell or bash
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/bash"
+		}
+		return shell, nil
 	}
 
 	return "", fmt.Errorf("unsupported panel type: %s", panel.Type)
