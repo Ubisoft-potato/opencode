@@ -165,6 +165,17 @@ type InputPanel struct {
 	currentModel    string // Current selected model
 }
 
+var completionSuggestions = []string{
+	"new",
+	"models",
+	"agents",
+	"clear",
+	"agent",
+	"share",
+	"unshare",
+	"compact",
+}
+
 // NewInputPanel creates a new input panel
 func NewInputPanel(httpClient *opencode.Client, socketPath string, comfortableThemes []string, currentTheme string) *InputPanel {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -742,7 +753,20 @@ func (p *InputPanel) handleCompletionDialogKeys(msg tea.KeyMsg) (tea.Model, tea.
 		}
 		return p, nil
 
+	case "backspace":
+		return p.handleBackspace()
+
+	case "delete":
+		return p.handleDelete()
+
 	default:
+		runes := []rune(keyStr)
+		if len(runes) == 1 {
+			char := runes[0]
+			if char >= 32 || char == 9 {
+				return p.insertCharacter(keyStr)
+			}
+		}
 		// For other keys, close the dialog and handle normally
 		p.showCompletionDialog = false
 		// Re-handle the key press normally
@@ -990,21 +1014,25 @@ func (p *InputPanel) handleArrowRight() (tea.Model, tea.Cmd) {
 
 // handleBackspace handles backspace
 func (p *InputPanel) handleBackspace() (tea.Model, tea.Cmd) {
-	if p.cursorPosition > 0 {
-		p.buffer = p.buffer[:p.cursorPosition-1] + p.buffer[p.cursorPosition:]
-		p.cursorPosition--
-		return p, p.syncInputState()
+	if p.cursorPosition == 0 {
+		return p, nil
 	}
-	return p, nil
+
+	p.buffer = p.buffer[:p.cursorPosition-1] + p.buffer[p.cursorPosition:]
+	p.cursorPosition--
+	p.refreshCompletionCommands()
+	return p, p.syncInputState()
 }
 
 // handleDelete handles delete key
 func (p *InputPanel) handleDelete() (tea.Model, tea.Cmd) {
-	if p.cursorPosition < len(p.buffer) {
-		p.buffer = p.buffer[:p.cursorPosition] + p.buffer[p.cursorPosition+1:]
-		return p, p.syncInputState()
+	if p.cursorPosition >= len(p.buffer) {
+		return p, nil
 	}
-	return p, nil
+
+	p.buffer = p.buffer[:p.cursorPosition] + p.buffer[p.cursorPosition+1:]
+	p.refreshCompletionCommands()
+	return p, p.syncInputState()
 }
 
 // insertCharacter inserts a character at the cursor position
@@ -1015,19 +1043,11 @@ func (p *InputPanel) insertCharacter(char string) (tea.Model, tea.Cmd) {
 	// Show completion dialog when "/" is typed at the beginning of the buffer
 	if char == "/" && p.cursorPosition == 1 {
 		p.showCompletionDialog = true
-		p.completionCommands = []string{
-			"new",
-			"models",
-			"agents",
-			"clear",
-			"agent",
-			"share",
-			"unshare",
-			"compact",
-			"summarize",
-		}
 		p.completionSelectedIdx = 0
+		p.completionScrollOffset = 0
 	}
+
+	p.refreshCompletionCommands()
 
 	return p, p.syncInputState()
 }
@@ -1052,6 +1072,7 @@ func (p *InputPanel) deletePreviousWord() (tea.Model, tea.Cmd) {
 
 	p.buffer = p.buffer[:i] + p.buffer[p.cursorPosition:]
 	p.cursorPosition = i
+	p.refreshCompletionCommands()
 	return p, p.syncInputState()
 }
 
@@ -1141,7 +1162,7 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 		if len(args) > 0 {
 			cmdToExecute = p.changeAgent(args[0])
 		}
-	case "/summarize", "/compact":
+	case "/compact":
 		cmdToExecute = p.compactCurrentSession()
 	}
 
@@ -2637,6 +2658,53 @@ func (p *InputPanel) renderModelDialog() string {
 	}
 
 	return result.String()
+}
+
+func (p *InputPanel) refreshCompletionCommands() {
+	if !p.showCompletionDialog {
+		return
+	}
+
+	if !strings.HasPrefix(p.buffer, "/") {
+		p.showCompletionDialog = false
+		p.completionCommands = nil
+		p.completionSelectedIdx = 0
+		p.completionScrollOffset = 0
+		return
+	}
+
+	word := strings.TrimPrefix(p.buffer, "/")
+	if idx := strings.Index(word, " "); idx >= 0 {
+		word = word[:idx]
+	}
+
+	filtered := make([]string, 0, len(completionSuggestions))
+	for _, cmd := range completionSuggestions {
+		if word == "" || strings.HasPrefix(cmd, word) {
+			filtered = append(filtered, cmd)
+		}
+	}
+
+	p.completionCommands = filtered
+	if len(filtered) == 0 {
+		p.completionSelectedIdx = 0
+		p.completionScrollOffset = 0
+		return
+	}
+
+	if p.completionSelectedIdx >= len(filtered) {
+		p.completionSelectedIdx = len(filtered) - 1
+	}
+
+	if p.completionSelectedIdx < 0 {
+		p.completionSelectedIdx = 0
+	}
+
+	if p.completionScrollOffset >= len(filtered) {
+		p.completionScrollOffset = 0
+	}
+
+	p.updateCompletionScrollOffset()
 }
 
 func (p *InputPanel) renderAgentDialog() string {
