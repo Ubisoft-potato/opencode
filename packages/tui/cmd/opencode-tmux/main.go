@@ -1018,7 +1018,6 @@ func (orch *TmuxOrchestrator) printStatus() {
 }
 
 func main() {
-	// 设置日志输出到文件
 	// Configure logging to file
 	logFileHomeDir, err := os.UserHomeDir()
 	if err != nil {

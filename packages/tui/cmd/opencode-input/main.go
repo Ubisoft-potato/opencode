@@ -1144,7 +1144,6 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	case "/compact":
 		cmdToExecute = p.compactCurrentSession()
 	}
-
 	// Combine input state sync with the command execution
 	if cmdToExecute != nil {
 		return p, tea.Batch(p.syncInputState(), cmdToExecute)
